@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from app.core.models import LegEvent, Trade
+from app.core.models import LegEvent, Trade, calendar_risk_policy
 from app.core.store import Store
 
 SUMMARY_COLUMNS = [
@@ -118,12 +118,23 @@ class CSVLogger:
         with ZipFile(output, "w", ZIP_DEFLATED) as archive:
             for name, content in files.items():
                 archive.writestr(name, content)
-            for kind in ("evaluation", "advisor", "error", "settlement"):
+            for kind in ("evaluation", "advisor", "error", "settlement", "entry_rejection"):
                 archive.writestr(
                     f"{kind}_audit.json",
                     json.dumps(await self.store.logs(kind), indent=2),
                 )
+            configuration = (await self.store.config()).model_dump(mode="json")
+            configuration["risk_policy"] = calendar_risk_policy()
+            archive.writestr("configuration.json", json.dumps(configuration, indent=2))
             archive.writestr(
-                "configuration.json", (await self.store.config()).model_dump_json(indent=2)
+                "manual_retest_audit.json",
+                json.dumps(
+                    [
+                        trade.model_dump(mode="json")
+                        for trade in await self.store.trades()
+                        if trade.manual_retest
+                    ],
+                    indent=2,
+                ),
             )
         return output.getvalue()

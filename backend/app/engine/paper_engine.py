@@ -9,8 +9,10 @@ from app.core.config import Settings, TradingConfig
 from app.core.market import EASTERN, MarketCalendar
 from app.core.models import (
     ACTIVE,
+    CALENDAR_STOP_LOSS_PCT,
     Evaluation,
     LegEvent,
+    ManualRetestRequest,
     OptionSpec,
     Quote,
     Status,
@@ -136,8 +138,26 @@ class PaperEngine:
             await self.error("VIX context unavailable (trading math unaffected)", exc)
             return None
 
-    async def entry(self, manual: bool = False) -> Trade:
+    async def entry(
+        self, manual: bool = False, *, retest: ManualRetestRequest | None = None
+    ) -> Trade:
         async with self.lock:
+            if retest is not None and not manual:
+                raise ValueError("Retests must be explicitly requested as manual entries")
+            trades = await self.store.trades()
+            if retest is not None:
+                existing = next(
+                    (
+                        trade
+                        for trade in trades
+                        if trade.manual_retest_request_id == retest.request_id
+                    ),
+                    None,
+                )
+                if existing:
+                    if existing.manual_retest_reason != retest.reason:
+                        raise ValueError("Retest request ID was reused with a different reason")
+                    return existing
             now = utcnow()
             local = now.astimezone(EASTERN)
             if not self.market.is_open(now):
@@ -149,8 +169,17 @@ class PaperEngine:
             config = await self.store.config()
             if not config.enabled:
                 raise ValueError("New entries are disabled")
-            trades = await self.store.trades()
-            if any(trade.entry_session == local.date() for trade in trades):
+            daily_exists = any(
+                trade.entry_session == local.date() and not trade.manual_retest for trade in trades
+            )
+            if retest is not None:
+                if not daily_exists:
+                    raise ValueError("Manual retest requires an existing normal SPX entry today")
+                if any(trade.status in ACTIVE for trade in trades):
+                    raise ValueError(
+                        "Manual retest requires all existing SPX positions to be closed"
+                    )
+            elif daily_exists:
                 raise ValueError("SPX already has an entry this session")
             if (
                 trades
@@ -195,9 +224,16 @@ class PaperEngine:
                 raise MarketDataError("Opening calendar debit must be positive")
             commission = Decimal(str(config.commission_per_leg))
             trade = Trade(
-                trade_id=f"DC-{local.date():%Y%m%d}-SPX",
+                trade_id=(
+                    f"DC-{local.date():%Y%m%d}-SPX-TEST-{retest.request_id.hex}"
+                    if retest
+                    else f"DC-{local.date():%Y%m%d}-SPX"
+                ),
                 entry_session=local.date(),
                 entry_timestamp=filled_at,
+                manual_retest=retest is not None,
+                manual_retest_request_id=retest.request_id if retest else None,
+                manual_retest_reason=retest.reason if retest else None,
                 front_expiry=contracts["short_put"].expiry,
                 back_expiry=contracts["back_put"].expiry,
                 put_strike=contracts["short_put"].strike,
@@ -205,20 +241,55 @@ class PaperEngine:
                 wing_width=Decimal(config.wing_width),
                 quantity=config.quantity,
                 calendar_debit_paid=debit,
+                calendar_stop_loss_pct=CALENDAR_STOP_LOSS_PCT,
                 commission_per_leg=commission,
                 commissions_dollars=commission * 4 * config.quantity,
                 contracts=contracts,
                 notes="SPXW PM cash-settled; conservative natural fills. "
-                + ("Manual entry. " if manual else "Scheduled entry. ")
-                + f"Commission ${commission}/contract/leg; no broker orders.",
+                + (
+                    f"MANUAL_RETEST: {retest.reason}. Extra test, not a scheduled study entry. "
+                    if retest
+                    else ("Manual entry. " if manual else "Scheduled entry. ")
+                )
+                + f"Commission ${commission}/contract/leg; no broker orders. "
+                + f"Bot-monitored calendar stop: -{CALENDAR_STOP_LOSS_PCT}% of opening "
+                + "debit before fees; reject entries already at this loss.",
             )
+            liquidation = liquidation_credit(quotes)
+            if liquidation <= trade.calendar_stop_credit:
+                initial_loss_pct = (debit - liquidation) / debit * 100
+                message = (
+                    f"Entry rejected: initial natural liquidation loss {initial_loss_pct:.2f}% "
+                    f"meets or exceeds the {trade.calendar_stop_loss_pct}% bot threshold "
+                    f"(debit {debit}, liquidation credit {liquidation} points)."
+                )
+                await self.store.log(
+                    "entry_rejection",
+                    {
+                        "symbol": trade.symbol,
+                        "timestamp": filled_at.isoformat(),
+                        "entry_session": local.date().isoformat(),
+                        "manual_retest": trade.manual_retest,
+                        "manual_retest_request_id": str(retest.request_id) if retest else None,
+                        "initial_loss_pct": str(initial_loss_pct),
+                        "calendar_stop_loss_pct": str(trade.calendar_stop_loss_pct),
+                        "calendar_debit": str(debit),
+                        "liquidation_credit": str(liquidation),
+                        "stop_credit": str(trade.calendar_stop_credit),
+                        "message": message,
+                        "quotes": {
+                            name: quote.model_dump(mode="json") for name, quote in quotes.items()
+                        },
+                    },
+                )
+                raise MarketDataError(message)
             legs = [
                 execution(trade, quotes[name], action, "ENTRY_CALENDAR", filled_at)
                 for side in ("put", "call")
                 for name, action in ((f"back_{side}", "BUY"), (f"short_{side}", "SELL"))
             ]
             evaluation = self.evaluation(trade, quotes, "ENTRY_CALENDAR", vix)
-            trade.mark_price = liquidation_credit(quotes)
+            trade.mark_price = liquidation
             trade.unrealized_pnl_dollars = (
                 trade.mark_price - debit
             ) * trade.multiplier - trade.commissions_dollars
@@ -268,6 +339,8 @@ class PaperEngine:
                 "maximum_bid_ask_points": float(
                     max(quote.ask - quote.bid for quote in quotes.values())
                 ),
+                "calendar_stop_loss_pct": str(trade.calendar_stop_loss_pct),
+                "calendar_stop_credit": str(trade.calendar_stop_credit),
             },
         )
 
@@ -321,7 +394,7 @@ class PaperEngine:
             _, close = self.market.bounds(trade.front_expiry)
             must_exit = (close - now).total_seconds() <= 300
             # Stop-loss takes priority over transform on the same sampled quote.
-            if liquidation <= trade.calendar_debit_paid * Decimal("0.8") or must_exit:
+            if liquidation <= trade.calendar_stop_credit or must_exit:
                 event = "STOP_LOSS" if not must_exit else "CALENDAR_TIME_EXIT"
                 status = Status.STOP if not must_exit else Status.TIME
                 legs = [
@@ -335,7 +408,12 @@ class PaperEngine:
                     status,
                     (liquidation - trade.calendar_debit_paid) * trade.multiplier,
                     now,
-                    f"{event}: liquidation credit {liquidation} points.",
+                    f"{event}: liquidation credit {liquidation} points. "
+                    + (
+                        f"Bot-monitored loss threshold {trade.calendar_stop_loss_pct}% before fees."
+                        if status == Status.STOP
+                        else ""
+                    ),
                 )
                 evaluation.kind = event
             elif credit >= trade.target_credit:

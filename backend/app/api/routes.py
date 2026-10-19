@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import TradingConfig
 from app.core.market import EASTERN
-from app.core.models import ACTIVE, utcnow
+from app.core.models import ACTIVE, ManualRetestRequest, calendar_risk_policy, utcnow
 from app.engine.paper_engine import PaperEngine
 from app.ibkr.client import MarketDataError
 
@@ -66,9 +66,12 @@ async def snapshot(engine: PaperEngine, connected: bool, broker_error: str | Non
         "advisor_enabled": engine.settings.advisor_enabled,
         "automatic_settlement": engine.settings.auto_settle_from_ib_close,
         "config": (await engine.store.config()).model_dump(),
+        "risk_policy": calendar_risk_policy(),
         "trades": rows,
         "metrics": {
             "total_trades": len(trades),
+            "normal_trade_count": sum(not trade.manual_retest for trade in trades),
+            "manual_retest_count": sum(trade.manual_retest for trade in trades),
             "closed_trades": len(closed),
             "proxy_settled_trades": sum(
                 trade.settlement_provenance == "ibkr_close_proxy" for trade in closed
@@ -117,15 +120,24 @@ async def configure(config: TradingConfig, request: Request) -> dict:
     return config.model_dump()
 
 
-@router.post("/entry")
-async def entry(request: Request) -> dict:
+async def execute_manual_entry(request: Request, retest: ManualRetestRequest | None = None) -> dict:
     engine = engine_for(request)
     try:
-        trade = await engine.entry(manual=True)
+        trade = await engine.entry(manual=True, retest=retest)
         return trade.model_dump(mode="json")
     except (ValueError, MarketDataError, ConnectionError, TimeoutError, OSError) as exc:
-        await engine.error("manual entry", exc)
+        await engine.error("manual retest" if retest else "manual entry", exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/entry")
+async def entry(request: Request) -> dict:
+    return await execute_manual_entry(request)
+
+
+@router.post("/entry/retest")
+async def manual_retest(body: ManualRetestRequest, request: Request) -> dict:
+    return await execute_manual_entry(request, body)
 
 
 class SettlementInput(BaseModel):

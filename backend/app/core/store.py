@@ -1,14 +1,18 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Integer, String, UniqueConstraint, select
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, inspect, select, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.core.config import TradingConfig
 from app.core.models import Evaluation, LegEvent, Trade, utcnow
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -17,10 +21,19 @@ class Base(DeclarativeBase):
 
 class TradeRow(Base):
     __tablename__ = "trades"
-    __table_args__ = (UniqueConstraint("symbol", "entry_session"),)
+    __table_args__ = (
+        Index(
+            "uq_trades_daily_entry",
+            "symbol",
+            "entry_session",
+            unique=True,
+            sqlite_where=text("manual_retest = 0"),
+        ),
+    )
     trade_id: Mapped[str] = mapped_column(String, primary_key=True)
     symbol: Mapped[str] = mapped_column(String)
     entry_session: Mapped[str] = mapped_column(String)
+    manual_retest: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("0"))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
@@ -47,9 +60,31 @@ class Store:
 
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
             await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
             await connection.exec_driver_sql("PRAGMA busy_timeout=5000")
+            # Explicit BEGIN makes SQLite table-rebuild DDL atomic on Python 3.11 too.
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
+            await connection.run_sync(self._initialize_schema)
+
+    @staticmethod
+    def _initialize_schema(connection: Connection) -> None:
+        inspector = inspect(connection)
+        if inspector.has_table("trades_before_retests"):
+            raise RuntimeError(
+                "Unexpected trades_before_retests table; inspect the database before migrating"
+            )
+        if inspector.has_table("trades") and "manual_retest" not in {
+            column["name"] for column in inspector.get_columns("trades")
+        }:
+            logger.info("Migrating the daily-entry constraint to support explicit manual retests")
+            connection.exec_driver_sql("ALTER TABLE trades RENAME TO trades_before_retests")
+            Base.metadata.tables["trades"].create(connection)
+            connection.exec_driver_sql(
+                "INSERT INTO trades (trade_id, symbol, entry_session, manual_retest, payload) "
+                "SELECT trade_id, symbol, entry_session, 0, payload FROM trades_before_retests"
+            )
+            connection.exec_driver_sql("DROP TABLE trades_before_retests")
+        Base.metadata.create_all(connection)
 
     async def trades(self) -> list[Trade]:
         async with self.sessions() as session:
@@ -69,10 +104,12 @@ class Store:
                         trade_id=trade.trade_id,
                         symbol=trade.symbol,
                         entry_session=trade.entry_session.isoformat(),
+                        manual_retest=trade.manual_retest,
                         payload=trade.model_dump(mode="json"),
                     )
                 )
             else:
+                row.manual_retest = trade.manual_retest
                 row.payload = trade.model_dump(mode="json")
             for leg in legs:
                 session.add(
