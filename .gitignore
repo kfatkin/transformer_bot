@@ -1,0 +1,52 @@
+# Local configuration and secrets (keep the documented template).
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test, lint, type-check and coverage outputs.
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Runtime state, market-data exports and logs.
+# Deliberate synthetic reports under samples/ remain trackable.
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+logs/
+
+# Frontend dependencies and build caches.
+node_modules/
+.vite/
+coverage/
+
+# Local editor and operating-system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
