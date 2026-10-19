@@ -2,7 +2,6 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
-import pandas as pd
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -12,10 +11,10 @@ class MarketCalendar:
         self.calendar = xcals.get_calendar("XNYS")
 
     def is_session(self, day: date) -> bool:
-        return bool(self.calendar.is_session(pd.Timestamp(day)))
+        return bool(self.calendar.is_session(day.isoformat()))
 
     def bounds(self, day: date) -> tuple[datetime, datetime]:
-        session = pd.Timestamp(day)
+        session = day.isoformat()
         return (
             self.calendar.session_open(session).to_pydatetime(),
             self.calendar.session_close(session).to_pydatetime(),
@@ -40,4 +39,4 @@ class MarketCalendar:
         raise RuntimeError("No trading session found in the next year")
 
     def sessions_between(self, start: date, end: date) -> int:
-        return len(self.calendar.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end)))
+        return len(self.calendar.sessions_in_range(start.isoformat(), end.isoformat()))

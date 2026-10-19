@@ -10,16 +10,45 @@ from app.core.models import LegEvent, Trade
 from app.core.store import Store
 
 SUMMARY_COLUMNS = [
-    "trade_id", "symbol", "entry_timestamp", "front_expiry", "back_expiry",
-    "put_strike", "call_strike", "wing_width", "quantity", "calendar_debit_paid",
-    "total_capital_committed", "transformed", "transform_timestamp",
-    "minutes_to_transform", "transformer_credit_received", "transform_gain_pct",
-    "guaranteed_floor_profit", "max_tent_profit", "status", "exit_timestamp",
-    "final_pnl_dollars", "roi_pct", "notes",
+    "trade_id",
+    "symbol",
+    "entry_timestamp",
+    "front_expiry",
+    "back_expiry",
+    "put_strike",
+    "call_strike",
+    "wing_width",
+    "quantity",
+    "calendar_debit_paid",
+    "total_capital_committed",
+    "transformed",
+    "transform_timestamp",
+    "minutes_to_transform",
+    "transformer_credit_received",
+    "transform_gain_pct",
+    "guaranteed_floor_profit",
+    "max_tent_profit",
+    "status",
+    "exit_timestamp",
+    "final_pnl_dollars",
+    "roi_pct",
+    "notes",
 ]
 LEG_COLUMNS = [
-    "trade_id", "timestamp", "event_type", "con_id", "symbol", "expiry", "strike",
-    "right", "action", "bid", "ask", "simulated_fill_price", "delta", "implied_vol",
+    "trade_id",
+    "timestamp",
+    "event_type",
+    "con_id",
+    "symbol",
+    "expiry",
+    "strike",
+    "right",
+    "action",
+    "bid",
+    "ask",
+    "simulated_fill_price",
+    "delta",
+    "implied_vol",
 ]
 
 
@@ -30,9 +59,9 @@ def render_csv(columns: list[str], rows: list[dict]) -> str:
     for row in rows:
         # Prevent spreadsheet formulas in user-provided settlement notes.
         safe = {
-            key: "'" + value if isinstance(value, str) and value.startswith(
-                ("=", "+", "@", "\t", "\r")
-            ) else value
+            key: "'" + value
+            if isinstance(value, str) and value.startswith(("=", "+", "@", "\t", "\r"))
+            else value
             for key, value in row.items()
         }
         writer.writerow(safe)
@@ -74,9 +103,7 @@ class CSVLogger:
             "trades_summary.csv": render_csv(
                 SUMMARY_COLUMNS, [summary_row(trade) for trade in trades]
             ),
-            "legs_execution_log.csv": render_csv(
-                LEG_COLUMNS, [leg_row(leg) for leg in legs]
-            ),
+            "legs_execution_log.csv": render_csv(LEG_COLUMNS, [leg_row(leg) for leg in legs]),
         }
 
     async def export(self) -> None:

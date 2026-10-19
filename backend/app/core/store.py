@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -104,7 +104,11 @@ class Store:
                 query = query.order_by(LogRow.id)
             rows = await session.scalars(query)
             return [
-                {"id": row.id, "logged_at": row.timestamp.isoformat(), **row.payload}
+                {
+                    "id": row.id,
+                    "logged_at": row.timestamp.replace(tzinfo=timezone.utc).isoformat(),
+                    **row.payload,
+                }
                 for row in rows
             ]
 
@@ -115,6 +119,4 @@ class Store:
 
     async def save_config(self, config: TradingConfig) -> None:
         async with self.sessions.begin() as session:
-            await session.merge(
-                ConfigRow(key="trading", payload=config.model_dump(mode="json"))
-            )
+            await session.merge(ConfigRow(key="trading", payload=config.model_dump(mode="json")))
