@@ -1,0 +1,25 @@
+{
+  "disclaimer": "SYNTHETIC FIXTURE. Not IBKR data, not performance evidence. Contract IDs are fictitious.",
+  "entry_time": "2026-10-19T14:30:00+00:00",
+  "transform_time": "2026-10-19T15:12:00+00:00",
+  "settlement_time": "2026-10-30T20:01:00+00:00",
+  "settlement": "6000",
+  "contracts": {
+    "short_put": {"con_id": 90001, "expiry": "2026-10-30", "strike": "5900", "right": "P"},
+    "short_call": {"con_id": 90002, "expiry": "2026-10-30", "strike": "6100", "right": "C"},
+    "back_put": {"con_id": 90003, "expiry": "2026-11-02", "strike": "5900", "right": "P"},
+    "back_call": {"con_id": 90004, "expiry": "2026-11-02", "strike": "6100", "right": "C"},
+    "outer_put": {"con_id": 90005, "expiry": "2026-10-30", "strike": "5895", "right": "P"},
+    "outer_call": {"con_id": 90006, "expiry": "2026-10-30", "strike": "6105", "right": "C"}
+  },
+  "entry_quotes": {
+    "short_put": ["4.00", "4.10"], "short_call": ["4.00", "4.10"],
+    "back_put": ["5.00", "5.10"], "back_call": ["5.00", "5.10"],
+    "outer_put": ["0.90", "1.00"], "outer_call": ["0.90", "1.00"]
+  },
+  "transform_quotes": {
+    "short_put": ["1.90", "2.00"], "short_call": ["1.90", "2.00"],
+    "back_put": ["4.65", "4.75"], "back_call": ["4.65", "4.75"],
+    "outer_put": ["0.90", "1.00"], "outer_call": ["0.90", "1.00"]
+  }
+}

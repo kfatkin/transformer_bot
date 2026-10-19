@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DC Time Machine | SPX Paper Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">THE VALIDATION DESK</span><h1>DC Time Machine<span class="pill">PAPER LAB</span></h1></div>
+    <div class="header-meta"><span id="connection" class="pill">CONNECTING</span><time id="clock">--</time><span id="market">--</span></div>
+  </header>
+  <main>
+    <div class="notice">SPX / SPXW only · Simulated natural bid/ask fills · No orders submitted to IBKR · A modeled floor is not an execution guarantee.</div>
+    <div id="error" role="alert" class="error hidden"></div>
+    <div class="section-heading"><div><span class="eyebrow">10–14 SESSION STUDY</span><h2>Performance overview</h2></div><a class="button secondary" href="/api/report">Download Full CSV Report ↓</a></div>
+    <section id="metrics" class="metrics" aria-live="polite"></section>
+    <div class="workspace">
+      <aside>
+        <section class="panel">
+          <span class="eyebrow">STRATEGY PARAMETERS</span><h2>Control room</h2>
+          <form id="config">
+            <label>Target ticker<select name="symbol"><option value="SPX">SPX · PM-settled SPXW</option></select></label>
+            <label>Contracts per trade<input name="quantity" type="number" min="1" max="100" value="1" required></label>
+            <label>Wing width<select name="wing_width"><option value="5">5 points · $500 spread width</option><option value="10">10 points · $1,000 spread width</option></select></label>
+            <label>Commission / contract / leg ($)<input name="commission_per_leg" type="number" min="0" max="10" step="0.01" value="0.65" required></label>
+            <label class="check"><input name="enabled" type="checkbox" checked> Enable new daily entries</label>
+            <button type="submit">Save configuration</button>
+          </form>
+          <button id="entry" class="secondary full">Simulate Entry Now</button>
+          <p class="muted">Manual entries require live quotes during regular market hours and share the one-entry-per-session limit. Settings only affect new trades.</p>
+          <div class="schedule"><span class="eyebrow">NEXT 10:30 EASTERN ENTRY</span><strong id="countdown">--</strong><span id="campaign" class="muted"></span></div>
+        </section>
+        <section class="panel">
+          <span class="eyebrow">CASH SETTLEMENT</span><h2>Expiration reconciliation</h2>
+          <p class="muted">Automatic mode uses the delayed IBKR closing-index proxy, not a certified exercise-settlement value. To reconcile a pending trade manually, use the verified SPXW PM value, never AM SET.</p>
+          <form id="settlement">
+            <label>Expired trade<select name="trade_id" id="settlement-trades" required><option value="">No pending expirations</option></select></label>
+            <label>Official settlement value<input name="value" type="number" min="1" step="0.01" required></label>
+            <label>Verification source<input name="source" type="text" minlength="10" maxlength="1000" placeholder="Source URL / statement reference" required></label>
+            <label class="check"><input name="confirmed" type="checkbox" required> I verified this trade's official SPXW PM value</label>
+            <button type="submit" class="secondary">Record settlement</button>
+          </form>
+        </section>
+      </aside>
+      <div class="main-column">
+        <div class="section-heading"><div><span class="eyebrow">LIVE POSITION MONITOR</span><h2>Active paper trades</h2></div><span class="muted">15–30 sec quote cadence</span></div>
+        <section id="trades" class="trade-grid"></section>
+        <section class="panel feed-panel"><div class="section-heading"><div><span class="eyebrow">MARKET STRUCTURE NOTES</span><h2>AI reasoning feed</h2></div><span id="advisor-mode" class="pill"></span></div><div id="feed"></div></section>
+        <section class="panel"><h2>Completed trades</h2><div class="table-scroll"><table><thead><tr><th>Trade</th><th>Outcome</th><th>Net P&amp;L</th><th>ROI</th></tr></thead><tbody id="history"></tbody></table></div></section>
+        <section class="panel"><h2>Operational audit</h2><div id="errors" class="muted"></div></section>
+      </div>
+    </div>
+  </main>
+  <div id="toast" role="status" class="toast hidden"></div>
+  <footer>For research only. No guarantee of fills, profitability, or limited real-world loss. Keep TWS API read-only enabled.</footer>
+</body>
+</html>

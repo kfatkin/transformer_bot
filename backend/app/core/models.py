@@ -3,7 +3,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 def utcnow() -> datetime:
@@ -38,6 +38,8 @@ class Quote(BaseModel):
     ask: Decimal = Field(gt=0)
     delta: float | None = None
     implied_vol: float | None = None
+    bid_size: Decimal | None = Field(default=None, ge=0)
+    ask_size: Decimal | None = Field(default=None, ge=0)
     market_data_type: int = 1
 
     @model_validator(mode="after")
@@ -50,6 +52,7 @@ class Quote(BaseModel):
             raise ValueError("Only live market data is accepted")
         return self
 
+    @computed_field
     @property
     def mid(self) -> Decimal:
         return (self.bid + self.ask) / 2
@@ -98,6 +101,9 @@ class Trade(BaseModel):
     unrealized_pnl_dollars: Decimal | None = None
     current_transform_credit: Decimal | None = None
     last_quote_at: datetime | None = None
+    settlement_value: Decimal | None = None
+    settlement_source: str | None = None
+    settlement_provenance: Literal["verified_official", "ibkr_close_proxy"] | None = None
     notes: str = ""
 
     @property
@@ -106,11 +112,7 @@ class Trade(BaseModel):
 
     @property
     def target_credit(self) -> Decimal:
-        return (
-            self.calendar_debit_paid
-            + self.wing_width
-            + self.commission_per_leg * 8 / 100
-        )
+        return self.calendar_debit_paid + self.wing_width + self.commission_per_leg * 8 / 100
 
     @property
     def capital(self) -> Decimal:
