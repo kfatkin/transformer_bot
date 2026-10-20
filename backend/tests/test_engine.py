@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zipfile import ZipFile
@@ -7,10 +8,11 @@ from zipfile import ZipFile
 import pytest
 
 from app.core.config import TradingConfig
-from app.core.models import Status
+from app.core.models import Status, Trade
 from app.engine.csv_logger import LEG_COLUMNS, SUMMARY_COLUMNS
 from app.engine.math import condor_payoff_loss
 from app.ibkr.chains import expiry_pairs
+from app.ibkr.client import MarketDataError
 from conftest import transform_prices
 
 
@@ -91,18 +93,90 @@ async def test_official_settlement_all_payoff_regions(lab, settlement, status, l
         await engine.settle(trade.trade_id, Decimal(settlement), "Verified fixture reference")
 
 
-async def test_calendar_stop_loss_at_exact_twenty_percent(lab):
+async def test_calendar_stop_loss_at_exact_thirty_percent(lab):
     engine, provider, clock = lab
     trade = await engine.entry(manual=True)
-    # Liquidation = 2 * (4.98 - 4.1) = 1.76, precisely 80% of 2.2.
-    provider.prices = {"back_put": ("4.98", "5.08"), "back_call": ("4.98", "5.08")}
+    provider.prices = {"back_put": ("4.87", "4.97"), "back_call": ("4.87", "4.97")}
     await engine.poll()
     trade = (await engine.store.trades())[0]
     assert trade.status == Status.STOP
-    assert trade.final_pnl_dollars == Decimal("-49.20")
-    assert trade.roi_pct == Decimal("-49.20") / 220 * 100
+    assert trade.calendar_stop_loss_pct == 30
+    assert trade.calendar_stop_credit == Decimal("1.54")
+    assert trade.final_pnl_dollars == Decimal("-71.20")
+    assert trade.roi_pct == Decimal("-71.20") / 220 * 100
     assert len(await engine.store.logs("leg")) == 8
     assert (await engine.store.logs("leg"))[-1]["event_type"] == "STOP_LOSS"
+
+
+@pytest.mark.parametrize("liquidation", ["1.76", "1.65", "1.55", "1.5401"])
+async def test_calendar_remains_open_before_thirty_percent_loss(lab, liquidation):
+    engine, provider, _ = lab
+    await engine.entry(manual=True)
+    bid = Decimal("4.1") + Decimal(liquidation) / 2
+    provider.prices = {
+        "back_put": (bid, bid + Decimal("0.1")),
+        "back_call": (bid, bid + Decimal("0.1")),
+        "outer_put": ("1.9", "2"),
+        "outer_call": ("1.9", "2"),
+    }
+    await engine.poll()
+    trade = (await engine.store.trades())[0]
+    assert trade.status == Status.CALENDAR
+    assert len(await engine.store.logs("leg")) == 4
+
+
+@pytest.mark.parametrize("bid", ["4.87", "4.80"])
+async def test_entry_guard_rejects_thirty_percent_or_worse_spread_loss(lab, bid):
+    engine, provider, _ = lab
+    provider.prices = {"back_put": (bid, "5.1"), "back_call": (bid, "5.1")}
+    with pytest.raises(MarketDataError, match="Entry rejected"):
+        await engine.entry(manual=True)
+    assert await engine.store.trades() == []
+    assert await engine.store.logs("leg") == []
+    audit = await engine.store.logs("entry_rejection")
+    assert len(audit) == 1
+    assert Decimal(audit[0]["initial_loss_pct"]) >= 30
+    assert len(audit[0]["quotes"]) == 6
+    with ZipFile(io.BytesIO(await engine.csv.report())) as archive:
+        assert "entry_rejection_audit.json" in archive.namelist()
+        assert list(csv.DictReader(io.StringIO(archive.read("trades_summary.csv").decode()))) == []
+        assert (
+            list(csv.DictReader(io.StringIO(archive.read("legs_execution_log.csv").decode()))) == []
+        )
+
+
+async def test_entry_guard_allows_just_under_thirty_percent(lab):
+    engine, provider, _ = lab
+    provider.prices = {"back_put": ("4.87005", "5.1"), "back_call": ("4.87005", "5.1")}
+    trade = await engine.entry(manual=True)
+    assert trade.status == Status.CALENDAR
+    assert trade.mark_price == Decimal("1.54010")
+    assert trade.calendar_stop_loss_pct == 30
+    assert await engine.store.logs("entry_rejection") == []
+
+
+async def test_legacy_closed_trade_keeps_original_stop_policy(lab):
+    engine, provider, _ = lab
+    trade = await engine.entry(manual=True)
+    payload = trade.model_dump(mode="json")
+    payload.pop("calendar_stop_loss_pct", None)
+    payload.pop("calendar_stop_credit", None)
+    payload.update(status=Status.STOP, final_pnl_dollars="-49.20")
+    legacy = Trade.model_validate(payload)
+    assert legacy.calendar_stop_loss_pct == 20
+    assert legacy.calendar_stop_credit == Decimal("1.76")
+    assert legacy.final_pnl_dollars == Decimal("-49.20")
+
+
+async def test_bot_stop_scales_with_quantity_and_uses_actual_overshoot(lab):
+    engine, provider, _ = lab
+    await engine.configure(TradingConfig(quantity=3))
+    await engine.entry(manual=True)
+    provider.prices = {"back_put": ("4.85", "4.95"), "back_call": ("4.85", "4.95")}
+    await engine.poll()
+    trade = (await engine.store.trades())[0]
+    assert trade.status == Status.STOP
+    assert trade.final_pnl_dollars == Decimal("-225.60")
 
 
 async def test_no_fill_on_disconnect_or_closed_market(lab):
@@ -158,10 +232,15 @@ async def test_restart_csv_projection_is_idempotent_and_bundle_complete(lab):
             "advisor_audit.json",
             "error_audit.json",
             "settlement_audit.json",
+            "entry_rejection_audit.json",
+            "manual_retest_audit.json",
             "configuration.json",
         }
+        assert json.loads(archive.read("manual_retest_audit.json")) == []
     await engine.store.engine.dispose()
-    assert (await engine.store.trades())[0].status == Status.CONDOR
+    reloaded = (await engine.store.trades())[0]
+    assert reloaded.status == Status.CONDOR
+    assert reloaded.calendar_stop_loss_pct == 30
     assert await engine.csv.contents() == before
 
 

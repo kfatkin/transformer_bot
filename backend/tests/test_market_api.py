@@ -1,5 +1,8 @@
+import io
+import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +12,7 @@ from app.core.config import Settings
 from app.core.market import MarketCalendar
 from app.core.models import OptionSpec, Quote
 from app.main import create_app
+from conftest import FakeProvider, FakeSelector
 
 
 def test_holiday_dst_and_half_day():
@@ -51,6 +55,9 @@ def test_api_dashboard_config_export_and_same_origin(tmp_path):
         state = client.get("/api/state").json()
         assert state["metrics"]["total_trades"] == 0
         assert state["connected"] is False
+        assert state["risk_policy"]["calendar_stop_loss_pct"] == "30"
+        assert state["risk_policy"]["broker_stop_orders"] is False
+        assert state["risk_policy"]["reject_at_stop_on_entry"] is True
         response = client.put(
             "/api/config",
             json={
@@ -102,3 +109,32 @@ async def test_stale_quote_rejected(lab):
     clock[0] = clock[0].replace(minute=32)
     with pytest.raises(RuntimeError, match="stale"):
         engine.validate_quotes(quotes, specs)
+
+
+def test_entry_guard_returns_explicit_error_without_recording_a_trade(tmp_path, monkeypatch):
+    import app.engine.paper_engine as engine_module
+
+    clock = [datetime(2026, 10, 19, 14, 30, tzinfo=timezone.utc)]
+    monkeypatch.setattr(engine_module, "utcnow", lambda: clock[0])
+    app = create_app(Settings(data_dir=tmp_path), run_scheduler=False)
+    with TestClient(app, base_url="http://localhost") as client:
+        provider = FakeProvider(clock)
+        provider.prices = {
+            "back_put": ("4.87", "5.1"),
+            "back_call": ("4.87", "5.1"),
+        }
+        app.state.engine.provider = provider
+        app.state.engine.selector = FakeSelector()
+        response = client.post("/api/entry", json={})
+        assert response.status_code == 409
+        assert "Entry rejected" in response.json()["detail"]
+        state = client.get("/api/state").json()
+        assert state["trades"] == []
+        assert state["errors"][0]["component"] == "manual entry"
+        with ZipFile(io.BytesIO(client.get("/api/report").content)) as archive:
+            rejections = json.loads(archive.read("entry_rejection_audit.json"))
+            assert len(rejections) == 1
+            assert rejections[0]["initial_loss_pct"] == "30.0"
+            assert len(rejections[0]["quotes"]) == 6
+            config = json.loads(archive.read("configuration.json"))
+            assert config["risk_policy"]["calendar_stop_loss_pct"] == "30"

@@ -2,8 +2,20 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+CALENDAR_STOP_LOSS_PCT = Decimal("30")
+
+
+def calendar_risk_policy() -> dict[str, str | bool]:
+    return {
+        "calendar_stop_loss_pct": str(CALENDAR_STOP_LOSS_PCT),
+        "loss_basis": "natural_liquidation_before_fees",
+        "broker_stop_orders": False,
+        "reject_at_stop_on_entry": True,
+    }
 
 
 def utcnow() -> datetime:
@@ -21,6 +33,14 @@ class Status(StrEnum):
 
 
 ACTIVE = {Status.CALENDAR, Status.CONDOR}
+
+
+class ManualRetestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    request_id: UUID
+    reason: str = Field(min_length=10, max_length=500)
+    confirmed: Literal[True]
 
 
 class OptionSpec(BaseModel):
@@ -76,6 +96,9 @@ class Trade(BaseModel):
     symbol: Literal["SPX"] = "SPX"
     entry_session: date
     entry_timestamp: datetime
+    manual_retest: bool = False
+    manual_retest_request_id: UUID | None = None
+    manual_retest_reason: str | None = None
     front_expiry: date
     back_expiry: date
     put_strike: Decimal
@@ -83,6 +106,12 @@ class Trade(BaseModel):
     wing_width: Decimal
     quantity: int
     calendar_debit_paid: Decimal
+    calendar_stop_loss_pct: Decimal = Field(
+        default=Decimal("20"),
+        gt=0,
+        lt=100,
+        description="Legacy trades without a recorded policy retain their original 20% threshold.",
+    )
     commission_per_leg: Decimal
     commissions_dollars: Decimal
     contracts: dict[str, OptionSpec]
@@ -106,6 +135,21 @@ class Trade(BaseModel):
     settlement_provenance: Literal["verified_official", "ibkr_close_proxy"] | None = None
     notes: str = ""
 
+    @model_validator(mode="after")
+    def validate_retest_metadata(self) -> "Trade":
+        has_metadata = (
+            self.manual_retest_request_id is not None
+            and self.manual_retest_reason is not None
+            and len(self.manual_retest_reason.strip()) >= 10
+        )
+        if self.manual_retest and not has_metadata:
+            raise ValueError("Manual retests require a request ID and reason")
+        if not self.manual_retest and (
+            self.manual_retest_request_id is not None or self.manual_retest_reason is not None
+        ):
+            raise ValueError("Normal daily entries cannot carry manual-retest metadata")
+        return self
+
     @property
     def multiplier(self) -> Decimal:
         return Decimal(100 * self.quantity)
@@ -117,6 +161,11 @@ class Trade(BaseModel):
     @property
     def capital(self) -> Decimal:
         return self.calendar_debit_paid * self.multiplier
+
+    @computed_field
+    @property
+    def calendar_stop_credit(self) -> Decimal:
+        return self.calendar_debit_paid * (1 - self.calendar_stop_loss_pct / 100)
 
 
 class Evaluation(BaseModel):

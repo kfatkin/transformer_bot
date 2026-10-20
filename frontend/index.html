@@ -30,6 +30,11 @@
             <button type="submit">Save configuration</button>
           </form>
           <button id="entry" class="secondary full">Simulate Entry Now</button>
+          <label>Manual retest reason<input id="retest-reason" type="text" minlength="10" maxlength="500" value="Observe 30% bot-monitored calendar protection"></label>
+          <label class="check"><input id="retest-confirm" type="checkbox"> I confirm ONE extra SPX paper test, not a daily study entry. No broker order.</label>
+          <button id="retest" class="secondary full" disabled>Manual Retest</button>
+          <p id="retest-help" class="muted">Retests require today's normal entry and no active SPX positions. They are labeled separately and retain all quote and loss protections.</p>
+          <p id="risk-policy" class="muted">Loading calendar protection policy…</p>
           <p class="muted">Manual entries require live quotes during regular market hours and share the one-entry-per-session limit. Settings only affect new trades.</p>
           <div class="schedule"><span class="eyebrow">NEXT 10:30 EASTERN ENTRY</span><strong id="countdown">--</strong><span id="campaign" class="muted"></span></div>
         </section>
@@ -49,7 +54,7 @@
         <div class="section-heading"><div><span class="eyebrow">LIVE POSITION MONITOR</span><h2>Active paper trades</h2></div><span class="muted">15–30 sec quote cadence</span></div>
         <section id="trades" class="trade-grid"></section>
         <section class="panel feed-panel"><div class="section-heading"><div><span class="eyebrow">MARKET STRUCTURE NOTES</span><h2>AI reasoning feed</h2></div><span id="advisor-mode" class="pill"></span></div><div id="feed"></div></section>
-        <section class="panel"><h2>Completed trades</h2><div class="table-scroll"><table><thead><tr><th>Trade</th><th>Outcome</th><th>Net P&amp;L</th><th>ROI</th></tr></thead><tbody id="history"></tbody></table></div></section>
+        <section class="panel"><h2>Completed trades</h2><div class="table-scroll"><table><thead><tr><th>Trade</th><th>Outcome</th><th>Bot loss trigger</th><th>Net P&amp;L</th><th>ROI</th></tr></thead><tbody id="history"></tbody></table></div></section>
         <section class="panel"><h2>Operational audit</h2><div id="errors" class="muted"></div></section>
       </div>
     </div>

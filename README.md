@@ -124,8 +124,8 @@ depends on its timestamp resolution behavior.
   sample completion, not a fabricated 10:30:00 fill. Selected short deltas are
   rechecked. All fills must occur in the 10:30 minute, or the entry is skipped.
   API/network latency means exact simultaneous 10:30:00 fills are not promised.
-- One entry per SPX/session, enforced in both the engine and a SQLite unique
-  constraint. Manual entry shares that limit, requires an open session, and
+- One normal entry per SPX/session, enforced in both the engine and a SQLite partial
+  unique index. Standard manual entry shares that limit, requires an open session, and
   uses the same live quote validation. No after-hours fictitious entries.
 - Default debit is back-long **asks** minus front-short **bids**. Each simulated
   execution requires displayed size on the fill side sufficient for its entire
@@ -145,6 +145,45 @@ depends on its timestamp resolution behavior.
   with the first successful entry and includes market sessions without a trade.
   Keep the app running for at least 10 sessions; 14 is the default upper bound.
   Closed-position statistics are not final until every open trade is resolved.
+
+### Controlled manual retests
+
+Use **Manual Retest** only for an explicitly confirmed extra plumbing/protection
+test after today's normal SPX entry has closed. Every existing SPX position must
+be closed, including positions from earlier sessions. The override never deletes,
+reopens, or alters the original trade, and does not change the normal daily cap.
+The enabled setting, study window, regular hours, live quote validation, quantity,
+and 30% initial-loss guard still apply.
+
+The dashboard requires a reason and the explicit **ONE extra SPX paper test**
+confirmation checkbox. The dedicated `POST /api/entry/retest` endpoint requires:
+
+```json
+{
+  "request_id": "7a94eb23-40dd-4abe-a0f1-f7adb53a5c76",
+  "reason": "Observe 30% bot-monitored calendar protection",
+  "confirmed": true
+}
+```
+
+Generate a **new UUID for each intentional new test**, but reuse that exact UUID
+and reason after a timeout or uncertain response. A repeated successful request
+returns its existing trade, even after closure, restart, or market close, without
+new fills. Reusing its ID with a different reason is rejected. The dashboard saves
+pending requests in tab session storage, including across reloads; do not clear
+this storage or change the UUID to bypass an ambiguous result.
+
+Retests have `-TEST-<UUID>` IDs, persisted request/reason metadata, and
+`MANUAL_RETEST` CSV notes. ZIP reports include `manual_retest_audit.json` with their
+full metadata. The dashboard shows daily and retest counts separately.
+**All aggregate performance metrics include retests**; these are not additional
+10:30 study observations. Exported CSV column schemas remain unchanged.
+
+On first startup with this version, SQLite automatically rebuilds the trade table
+in one explicit transaction to replace the old unconditional daily constraint with
+the partial index. Original JSON payloads, audit rows, and settings are preserved;
+a migration failure rolls back and fails startup. Back up the database before
+upgrading, using SQLite's backup API rather than copying a live WAL database.
 
 ### Arithmetic and fees
 
@@ -168,12 +207,42 @@ the exact original `C >= D + W` gate. Exchange/regulatory fees, slippage and
 settlement charges beyond this fixed commission are not modeled. Configuration
 changes affect new trades only.
 
-Pre-transform stop: full calendar liquidation credit (back bids minus front
-asks) at or below `0.8 × D`. The threshold excludes commissions, while reported
-P&L deducts them. Stop has priority if simultaneous stop/transform conditions
-are observed. Polling gaps can overshoot −20%; the recorded quote is used,
-never an assumed fill at the threshold. The stop is a **sale credit**, not an
-“exit debit,” unless liquidation actually has negative value.
+### Bot-monitored calendar protection
+
+New calendars use a **30% loss trigger**, evaluated by the bot on each successful
+quote poll. **No resting, preset, or broker-side stop order is submitted.**
+Full calendar liquidation credit is back-long bids minus front-short asks:
+
+```text
+L = back_put_bid + back_call_bid - short_put_ask - short_call_ask
+loss percentage = (D - L) / D × 100
+bot stop condition = L <= 0.70 × D
+```
+
+On that condition, the engine simulates selling both back longs and buying back
+both front shorts at the observed natural quotes, then records all four closing
+legs and `CLOSED_STOP_LOSS`. The threshold is measured against opening debit
+**before commissions**; final P&L/ROI still deduct all paid commissions. Midpoint
+quotes do not determine the loss trigger.
+
+The same check runs **before entry**. If the proposed calendar would already
+show a 30% or greater immediate liquidation loss from aggregate bid/ask costs,
+the entry is rejected without creating a trade or simulated fills. The failed
+attempt, six-leg quote snapshot, loss percentage and rejection reason are
+persisted under `entry_rejection` and included in the ZIP report. Per-leg spread,
+freshness, delta and displayed-size checks still apply.
+
+The stop policy is captured per trade and displayed in the dashboard/audit.
+Historical trades without this field retain their original **20%** policy,
+including any still-open legacy calendars. Closed history and today's recorded
+stop-out are not rewritten, reopened, or retried. New trades receive 30%.
+
+Stops take priority over transforms on the same sample. Polling gaps, missing
+data, disconnection and slippage can produce losses **greater than 30%**; this
+is not a guaranteed loss cap. The bot must be running and receiving valid live
+quotes. A transformed condor no longer uses the calendar loss trigger; its
+existing expiration settlement workflow remains unchanged. The calendar exit
+is a **sale credit**, not an “exit debit,” unless liquidation is negative.
 
 **Untransformed expiration:** attempt full liquidation five minutes before the
 front-session close (`CLOSED_CALENDAR_TIME_EXIT`) rather than silently dropping
@@ -232,13 +301,25 @@ position cards, fee-aware transform progress, stale-quote flags, automatic proxy
 and manual verified settlement, realized statistics, streamed advisory/error feeds and CSV/ZIP
 downloads. WebSocket updates every two seconds; broker polling is independent.
 
+Active trade cards show each leg's long/short side, exact symbol/strike/put-or-call,
+expiration, per-leg quantity, and IBKR contract ID. Calendars display their four
+held legs, not the two prospective outer wings. After transformation, the current
+condor legs are shown separately from the original calendar history, so sold
+back-month longs are not presented as current holdings.
+
+In **Completed trades**, expand **View contract legs** to see the same contract
+details and, if transformed, both structures. Expanded history stays open through
+live dashboard updates. Tables scroll horizontally on narrow screens.
+
 - `GET /api/state`, `GET /api/health`
 - `PUT /api/config` — `symbol` must be `SPX`, quantity 1–100, wings 5 or 10
 - `POST /api/entry` — JSON `{}`; manual live-data simulated entry
+- `POST /api/entry/retest` — explicitly confirmed, UUID-idempotent extra test;
+  see controlled manual retests above
 - `POST /api/trades/{trade_id}/settlement` — JSON
   `{"value":"6000.00","source":"verified statement reference","confirmed_official_spxw_pm":true}`
 - `GET /api/csv/trades_summary.csv`, `GET /api/csv/legs_execution_log.csv`
-- `GET /api/report` — ZIP bundle including quote-evaluation, advisor, error and
+- `GET /api/report` — ZIP bundle including quote-evaluation, entry-rejection, manual-retest, advisor, error and
   settlement audit JSON plus current configuration
 - `WS /api/stream` — dashboard state and feed updates
 
@@ -284,6 +365,9 @@ with offsets. Prices/floor/tent are per-contract points, capital and final P&L
 are aggregate dollars. Settlement bid/ask/Greeks are blank because intrinsic
 cash settlement is not an executed market quote. Extra lifecycle event/status
 values above extend the requested schema without discarding edge cases.
+The two CSV column schemas are unchanged. Each new trade's notes record its
+bot-monitored loss threshold; rejection audits live in SQLite/report JSON,
+not as fake trade/leg rows. Report configuration includes the current risk policy.
 Quantities are joined from the summary by `trade_id`. Net final P&L/ROI deduct
 modeled commissions; the original floor/tent columns preserve the raw formulas.
 
@@ -292,6 +376,15 @@ trades. No losses with positive wins gives infinite profit factor; no outcomes
 gives N/A. Zero P&L is not counted as a win.
 
 ## Verification and synthetic samples
+
+The frontend leg-selection tests use Node.js 18+ (test-only; no Node build or
+runtime is required for the dashboard). Run from the repository root:
+
+```bash
+node --test frontend/tests/trade_legs.test.mjs
+```
+
+Backend checks:
 
 ```bash
 cd backend
@@ -310,7 +403,8 @@ with 12 leg events. These are **synthetic fixtures, not real market results**.
 The generator never connects to IBKR and refuses the default production data
 directory as an output target.
 
-Tests cover exact fee-aware thresholds and stop boundaries, quantity/cost
+Tests cover exact fee-aware thresholds, 30% bot-stop/entry-guard boundaries,
+legacy-policy preservation, quantity/cost
 scaling, all payoff regions, session holidays/DST/half-days, duplicates,
 restart/export idempotence, disconnects, quote validation, API validation and
 same-origin writes, historical-date matching and automatic proxy reconciliation.
