@@ -301,6 +301,16 @@ position cards, fee-aware transform progress, stale-quote flags, automatic proxy
 and manual verified settlement, realized statistics, streamed advisory/error feeds and CSV/ZIP
 downloads. WebSocket updates every two seconds; broker polling is independent.
 
+Active trade cards show each leg's long/short side, exact symbol/strike/put-or-call,
+expiration, per-leg quantity, and IBKR contract ID. Calendars display their four
+held legs, not the two prospective outer wings. After transformation, the current
+condor legs are shown separately from the original calendar history, so sold
+back-month longs are not presented as current holdings.
+
+In **Completed trades**, expand **View contract legs** to see the same contract
+details and, if transformed, both structures. Expanded history stays open through
+live dashboard updates. Tables scroll horizontally on narrow screens.
+
 - `GET /api/state`, `GET /api/health`
 - `PUT /api/config` — `symbol` must be `SPX`, quantity 1–100, wings 5 or 10
 - `POST /api/entry` — JSON `{}`; manual live-data simulated entry
@@ -366,6 +376,15 @@ trades. No losses with positive wins gives infinite profit factor; no outcomes
 gives N/A. Zero P&L is not counted as a win.
 
 ## Verification and synthetic samples
+
+The frontend leg-selection tests use Node.js 18+ (test-only; no Node build or
+runtime is required for the dashboard). Run from the repository root:
+
+```bash
+node --test frontend/tests/trade_legs.test.mjs
+```
+
+Backend checks:
 
 ```bash
 cd backend

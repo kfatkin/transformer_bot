@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 const money = (n) => n == null ? "—" : Number(n).toLocaleString("en-US", {style:"currency",currency:"USD"});
 const number = (n, digits=2) => n == null ? "—" : Number(n).toFixed(digits);
 const stamp = (s) => s ? new Date(s).toLocaleString("en-US", {timeZone:"America/New_York",timeZoneName:"short"}) : "—";
-const active = new Set(["ACTIVE_CALENDAR","RISK_FREE_CONDOR"]);
+const expandedLegHistory = new Set();
 let latest;
 let initialized = false;
 const retestStorageKey = "dc-time-machine-pending-retest";
@@ -37,6 +37,62 @@ function metric(label, value, detail) {
   card.append(node("span",label),node("strong",value),node("span",detail));
   return card;
 }
+function tradeLegs(trade) {
+  const section = node("section",null,"contract-legs");
+  section.setAttribute("aria-label",`Contract legs for ${trade.trade_id}`);
+  for (const group of tradeLegGroups(trade)) {
+    const heading = node("h4",`${group.title} · ${group.current ? "CURRENT" : "HISTORICAL"}`);
+    section.append(heading,node("p",group.description,"muted"));
+    const scroll = node("div",null,"table-scroll");
+    scroll.tabIndex = 0;
+    scroll.setAttribute("role","region");
+    scroll.setAttribute("aria-label",`${group.title} for ${trade.trade_id}`);
+    const table = node("table",null,"leg-table");
+    table.dataset.stage = group.stage;
+    const head = node("thead");
+    const headings = node("tr");
+    for (const label of ["Position at this stage","Contract","Expiration","Qty","IBKR conId"]) {
+      const cell = node("th",label);
+      cell.scope = "col";
+      headings.append(cell);
+    }
+    head.append(headings);
+    const body = node("tbody");
+    for (const leg of group.legs) {
+      const row = node("tr");
+      row.dataset.leg = leg.name;
+      if (!leg.contract) {
+        const missing = node("td",`Contract details unavailable for ${leg.name}.`,"warn");
+        missing.colSpan = 5;
+        row.append(missing);
+      } else {
+        const contract = leg.contract;
+        row.append(
+          node("td",leg.position),
+          node("td",`${contract.symbol} ${contract.strike} ${contract.right === "P" ? "Put" : "Call"}`),
+          node("td",contract.expiry),
+          node("td",leg.quantity),
+          node("td",contract.con_id),
+        );
+      }
+      body.append(row);
+    }
+    table.append(head,body);
+    scroll.append(table);
+    section.append(scroll);
+  }
+  return section;
+}
+function historicalLegs(trade) {
+  const details = node("details",null,"leg-history");
+  details.open = expandedLegHistory.has(trade.trade_id);
+  details.append(node("summary","View contract legs"),tradeLegs(trade));
+  details.addEventListener("toggle",() => {
+    if (details.open) expandedLegHistory.add(trade.trade_id);
+    else expandedLegHistory.delete(trade.trade_id);
+  });
+  return details;
+}
 function card(trade) {
   const el = node("article",null,"trade");
   const head = node("div",null,"trade-head");
@@ -62,6 +118,7 @@ function card(trade) {
   progress.value=Math.max(0,Math.min(100,Number(trade.current_transform_credit || 0)/Number(trade.target_credit)*100));
   el.append(progress,node("small","Fee-aware target = opening debit + wing width + 8 leg commissions / 100"));
   el.append(node("small",`${trade.quote_stale ? "STALE / UNAVAILABLE" : "LIVE SAMPLE"} · ${stamp(trade.last_quote_at)}`,trade.quote_stale ? "warn" : ""));
+  el.append(tradeLegs(trade));
   return el;
 }
 function render(data) {
@@ -118,7 +175,10 @@ function render(data) {
   if (!pending.length) $("settlement-trades").firstChild.value="";
   if (pending.some(t => t.trade_id === selected)) $("settlement-trades").value=selected;
   $("history").replaceChildren(...data.trades.filter(t => !active.has(t.status)).reverse().map(t => {
-    const row=node("tr");row.append(node("td",t.trade_id + (t.manual_retest ? " (MANUAL RETEST)" : "")),node("td",t.status.replace("CLOSED_","") + (t.settlement_provenance === "ibkr_close_proxy" ? " (IBKR PROXY)" : "")),node("td",`${number(t.calendar_stop_loss_pct,0)}%`),node("td",money(t.final_pnl_dollars),Number(t.final_pnl_dollars)>=0?"good":"bad"),node("td",`${number(t.roi_pct)}%`));return row;
+    const row=node("tr");
+    const identity=node("td",null,"trade-identity");
+    identity.append(node("span",t.trade_id + (t.manual_retest ? " (MANUAL RETEST)" : "")),historicalLegs(t));
+    row.append(identity,node("td",t.status.replace("CLOSED_","") + (t.settlement_provenance === "ibkr_close_proxy" ? " (IBKR PROXY)" : "")),node("td",`${number(t.calendar_stop_loss_pct,0)}%`),node("td",money(t.final_pnl_dollars),Number(t.final_pnl_dollars)>=0?"good":"bad"),node("td",`${number(t.roi_pct)}%`));return row;
   }));
   $("advisor-mode").textContent=data.advisor_enabled ? "LLM ENABLED" : "LLM DISABLED";
   $("feed").replaceChildren(...(data.feed.length ? data.feed.map(item => {
@@ -197,3 +257,4 @@ function connect() {
 }
 fetch("/api/state").then(response => {if (!response.ok) throw new Error("State request failed");return response.json();}).then(render).catch(error=>toast(error.message));
 connect();
+import {ACTIVE_TRADE_STATUSES as active, tradeLegGroups} from "./trade_legs.mjs";
