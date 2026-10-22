@@ -235,6 +235,10 @@ async def test_restart_csv_projection_is_idempotent_and_bundle_complete(lab):
             "entry_rejection_audit.json",
             "manual_retest_audit.json",
             "configuration.json",
+            "butterfly_trades_summary.csv",
+            "butterfly_legs_execution_log.csv",
+            "butterfly_trade_audit.json",
+            "entry_skip_audit.json",
         }
         assert json.loads(archive.read("manual_retest_audit.json")) == []
     await engine.store.engine.dispose()

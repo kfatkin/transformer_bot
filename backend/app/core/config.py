@@ -40,3 +40,12 @@ class TradingConfig(BaseModel):
     quantity: int = Field(default=1, ge=1, le=100)
     wing_width: Literal[5, 10] = 5
     commission_per_leg: float = Field(default=0.65, ge=0, le=10)
+
+
+class ButterflyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    quantity: int = Field(default=1, ge=1, le=100)
+    wing_width: Literal[5, 10] = 5
+    commission_per_leg: float = Field(default=0.65, ge=0, le=10)

@@ -108,6 +108,14 @@ depends on its timestamp resolution behavior.
 
 ## How the study works
 
+There are two independent SPX paper strategies: the **10:30 double calendar**
+below and the **10:00 contrarian 0DTE debit-to-butterfly** described next.
+The new 0DTE strategy is **disabled by default**. After testing locally, enable
+it in **0DTE butterfly controls** and save before 10:00 Eastern. This does not
+enable or disable calendar entries. No deployment or restart enables it implicitly.
+Existing databases gain a separate butterfly table without rewriting calendar
+payloads, outcomes, configuration, or execution history.
+
 - `America/New_York` scheduling: **10:30 Eastern**, following daylight saving,
   not fixed UTC−5 year-round. XNYS sessions skip holidays and handle early closes.
   Conservative regular-hours monitoring stops at the equity-market close;
@@ -145,6 +153,59 @@ depends on its timestamp resolution behavior.
   with the first successful entry and includes market sessions without a trade.
   Keep the app running for at least 10 sessions; 14 is the default upper bound.
   Closed-position statistics are not final until every open trade is resolved.
+
+### 10:00 contrarian 0DTE debit-to-butterfly
+
+- Entry runs only **10:00:00–10:00:59 America/New_York**, on an exchange session.
+  There is no late catch-up or manual 0DTE entry. If selection or final quotes
+  miss the minute, no fill is recorded.
+- The opening baseline is the **open of IBKR's exact 09:30 RTH one-minute SPX
+  bar**, not yesterday's close, a 09:31 bar, or the current quote. Missing baseline,
+  missing same-day SPXW expiration, unavailable quotes or qualification failures
+  skip entry with a visible audit/error; no substitute values are invented.
+- Compare live SPX with that baseline at signal sampling: below → **call debit**;
+  above → **put debit**; exactly unchanged → skip. There is no minimum move.
+  This is a contrarian hypothesis, not a momentum signal or recommendation.
+- Scan the nearest configured number of listed OTM strikes within 6% of spot.
+  Select the long with signed absolute delta **0.30–0.50**, closest to **0.40**,
+  and recheck the band on fresh opening quotes. The short is one width farther
+  OTM; the prospective outer wing is two widths from the long. Only the long
+  and first short are held initially.
+- Configuration is independent: default **one spread**, **5-point spacing**
+  (5 or 10 selectable), and **$0.65 per contract per execution**. Same-day call
+  geometry is `+1 K, -1 (K+W)`; puts mirror downward.
+- Opening natural debit is `D = long.ask - short.bid`. Require `0 < D < W`
+  and sufficient displayed fill-side size. Reject an entry whose initial natural
+  liquidation `long.bid - short.ask` is already at or below `0.70 × D`.
+- Sell **one additional middle-strike option** and buy the next outer wing
+  only when natural adjustment credit `C = middle.bid - outer.ask` satisfies
+  `C >= D + 4 × commission_per_leg / 100`. The final balanced position is
+  **+1 / -2 / +1**, not +1/-1/+1. There is no extra funding buffer.
+- Modeled net expiration floor is `(C-D) × quantity × 100 - all four executed
+  leg commissions`; maximum tent profit adds `W × quantity × 100`.
+  At the middle strike the tent pays its maximum; outside the outer strikes
+  it pays the floor, with partial profit on the slopes.
+- Before transformation, the **30% bot-monitored loss trigger** uses natural
+  liquidation before fees. It is not a broker stop, and a sampled fill can
+  overshoot 30%. If still untransformed, liquidate **15 minutes before the actual
+  exchange-session close** (15:45 normally, 12:45 on a 13:00 early close).
+  Stop/time exit takes priority over transformation on the same evaluation.
+- Funded butterflies are held to same-day PM settlement, using the existing
+  clearly labeled closing-index proxy or verified manual SPXW PM value.
+  If an outage prevents the untransformed timed exit, record an explicit missed-exit
+  error and actual intrinsic settlement cashflows, never a fabricated 15:45 fill.
+- Each strategy has its own one-entry-per-session cap and study cohort.
+  The butterfly's **14-session** window begins at its first successful entry,
+  includes skipped sessions, and does not restart on application restart.
+  Disabling entries or completing that window never stops existing-position
+  monitoring or expiration reconciliation.
+
+Both engines use independent polling jobs with the existing **20-second default**
+interval. Calendar preflight/entry scans no longer hold the position-monitoring
+lock; overlapping IBKR samplers share refcounted subscriptions so one caller
+cannot cancel another caller's data. Polling is best effort, not a 20-second
+latency guarantee: slow broker responses, outages, and sequential trades can
+still delay or skip observations. No missed transforms or stops are backfilled.
 
 ### Controlled manual retests
 
@@ -313,14 +374,19 @@ live dashboard updates. Tables scroll horizontally on narrow screens.
 
 - `GET /api/state`, `GET /api/health`
 - `PUT /api/config` — `symbol` must be `SPX`, quantity 1–100, wings 5 or 10
+- `PUT /api/config/butterfly` — independent `enabled`, quantity 1–100, wings 5
+  or 10, and commission per leg; defaults disabled
 - `POST /api/entry` — JSON `{}`; manual live-data simulated entry
 - `POST /api/entry/retest` — explicitly confirmed, UUID-idempotent extra test;
   see controlled manual retests above
 - `POST /api/trades/{trade_id}/settlement` — JSON
   `{"value":"6000.00","source":"verified statement reference","confirmed_official_spxw_pm":true}`
 - `GET /api/csv/trades_summary.csv`, `GET /api/csv/legs_execution_log.csv`
+- `GET /api/csv/butterfly_trades_summary.csv`,
+  `GET /api/csv/butterfly_legs_execution_log.csv`
 - `GET /api/report` — ZIP bundle including quote-evaluation, entry-rejection, manual-retest, advisor, error and
-  settlement audit JSON plus current configuration
+  settlement/entry-skip audit JSON, complete butterfly trade metadata, and both
+  configurations. All four CSVs are included.
 - `WS /api/stream` — dashboard state and feed updates
 
 ### Optional AI advisor
@@ -338,6 +404,9 @@ Entry and every calendar transform evaluation enqueue advisor work independently
 of trading. A bounded queue and 12-second HTTP timeout prevent it from blocking
 trade decisions. Provider failures and queue overflow are persisted and shown;
 no fabricated “AI” response is emitted on failure. Disabled mode is labeled.
+Butterfly explanations instead discuss the contrarian signal, quote quality
+and commission-funded threshold; there is no front/back IV ratio for contracts
+with the same expiration. Unavailable context is labeled unknown.
 
 ## Persistence and reporting
 
@@ -346,18 +415,24 @@ Leg events and each trade state transition commit in a single transaction.
 Do not edit the database while running. Back up the directory with the app
 stopped so the WAL and database are consistent.
 
-The two CSVs are projected under `data/csv/`:
+Four CSVs are projected under `data/csv/`; the original two remain calendar-only:
 
 1. `trades_summary.csv` — the requested 23 columns, **one current row per
    trade**, updated after transitions.
 2. `legs_execution_log.csv` — the requested 14 columns, a growing audit of
    entry, transform, stop/time-exit and cash-settlement cashflows.
+3. `butterfly_trades_summary.csv` — independent cohort, opening baseline and
+   signal, direction/right, all three strikes, opening debit, funding metrics,
+   loss policy, costs, net floor/tent dollars and settlement provenance.
+4. `butterfly_legs_execution_log.csv` — individual butterfly executions with an
+   explicit **quantity** column. After transformation the middle-strike settlement
+   quantity is twice the configured spread count.
 
-Both are deterministically regenerated from SQLite into fsynced temporary
+All are deterministically regenerated from SQLite into fsynced temporary
 files and individually atomically replaced. This intentionally avoids blind
 CSV append: retries/restarts do not duplicate fills, and summary rows do not
-retain obsolete states. A crash between the two replacements can leave one CSV
-behind; startup regeneration repairs it. For a consistent pair, download the
+retain obsolete states. A crash between replacements can leave a CSV
+behind; startup regeneration repairs it. For a consistent snapshot, download the
 locked ZIP report or stop the application before copying files.
 
 Nulls are empty CSV cells; transformed is `TRUE/FALSE`; timestamps are ISO-8601
@@ -371,7 +446,12 @@ not as fake trade/leg rows. Report configuration includes the current risk polic
 Quantities are joined from the summary by `trade_id`. Net final P&L/ROI deduct
 modeled commissions; the original floor/tent columns preserve the raw formulas.
 
-Transform rate uses all entered trades; profit factor/win rate use only closed
+The dashboard/API retain calendar metrics under `metrics`, and expose separate
+`butterfly_metrics`, `butterfly_config`, and `next_butterfly_entry`. Unified position
+rows carry explicit strategy tags; the two cohorts are never pooled into one
+apparently improved win/transform rate.
+
+Within each cohort, transform rate uses all entered trades; profit factor/win rate use only closed
 trades. No losses with positive wins gives infinite profit factor; no outcomes
 gives N/A. Zero P&L is not counted as a win.
 
@@ -402,6 +482,11 @@ uses the real paper engine to write isolated sample CSVs under
 with 12 leg events. These are **synthetic fixtures, not real market results**.
 The generator never connects to IBKR and refuses the default production data
 directory as an output target.
+The same command also replays [butterfly_fixture.json](samples/butterfly_fixture.json):
+a synthetic **$200 debit**, transformation exactly at the **2.026-point**
+commission-funded threshold after 42 minutes, **$0 modeled net floor**, and
+**$500 net tent settlement**. Its seven leg-event rows include the doubled
+middle quantity; they appear only in the separate butterfly CSVs.
 
 Tests cover exact fee-aware thresholds, 30% bot-stop/entry-guard boundaries,
 legacy-policy preservation, quantity/cost

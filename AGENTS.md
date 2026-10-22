@@ -39,3 +39,23 @@ to `transformer_bot` and does not change the workflow for neighboring repositori
   scheduled study observations. Aggregate paper statistics include these tests.
 - Back up SQLite before a schema upgrade. Preserve original payloads/audits/settings
   and keep the table migration transactional, including rollback of its DDL.
+
+## Independent 0DTE butterfly cohort
+
+- Keep the 10:00 contrarian debit-to-butterfly strategy separate from the 10:30
+  double calendar: distinct table, configuration, daily cap, study metrics and CSVs.
+- New 0DTE entries are opt-in, disabled by default, and restricted to the 10:00
+  Eastern minute. No late/manual catch-up or synthetic opening baseline.
+- Use the exact 09:30 RTH SPX one-minute bar open. Below it means call debit;
+  above means put debit; unchanged or missing means no entry.
+- Long delta must remain signed 0.30–0.50, selected closest to absolute 0.40.
+  A balanced butterfly doubles the middle shorts; preserve actual leg quantities.
+- Fund the original debit and all four modeled execution commissions before
+  transforming. No extra buffer; never describe modeled floors as fill guarantees.
+- Apply the 30% sampled natural-liquidation loss trigger before fees, or exit
+  untransformed spreads 15 minutes before actual close, including early closes.
+- Monitor both cohorts independently even while entry scans run, after restart,
+  after disabling new entries, and after their study windows finish.
+- Never cancel a shared market-data subscription while another sampler uses it.
+- Do not restart the running service, enable the new cohort, or open a paper
+  position without owner approval. Rehearse schema changes on a consistent backup.

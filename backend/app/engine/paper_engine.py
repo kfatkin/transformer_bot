@@ -1,11 +1,13 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Protocol
 
 from app.advisor.ai_agent import Advisor
 from app.core.config import Settings, TradingConfig
+from app.core.butterfly import ButterflyTrade, BUTTERFLY_ACTIVE
 from app.core.market import EASTERN, MarketCalendar
 from app.core.models import (
     ACTIVE,
@@ -48,11 +50,29 @@ class Selector(Protocol):
     async def select(self, today: date, width: Decimal) -> dict[str, OptionSpec]: ...
 
 
-def execution(trade: Trade, quote: Quote, action: str, event: str, now: datetime) -> LegEvent:
+async def vix_context(
+    provider: DataProvider, on_error: Callable[[str, Exception], Awaitable[None]]
+) -> Decimal | None:
+    try:
+        return await provider.index("VIX")
+    except (MarketDataError, ConnectionError, TimeoutError, OSError) as exc:
+        await on_error("VIX context unavailable (trading math unaffected)", exc)
+        return None
+
+
+def execution(
+    trade: Trade | ButterflyTrade,
+    quote: Quote,
+    action: str,
+    event: str,
+    now: datetime,
+    quantity_multiplier: int = 1,
+) -> LegEvent:
     size = quote.ask_size if action == "BUY" else quote.bid_size
-    if size is None or size < trade.quantity:
+    quantity = trade.quantity * quantity_multiplier
+    if size is None or size < quantity:
         raise MarketDataError(
-            f"{quote.contract.con_id}: insufficient displayed {action} size for {trade.quantity} contracts"
+            f"{quote.contract.con_id}: insufficient displayed {action} size for {quantity} contracts"
         )
     return LegEvent(
         trade_id=trade.trade_id,
@@ -65,7 +85,22 @@ def execution(trade: Trade, quote: Quote, action: str, event: str, now: datetime
         simulated_fill_price=quote.ask if action == "BUY" else quote.bid,
         delta=quote.delta,
         implied_vol=quote.implied_vol,
+        quantity=quantity,
     )
+
+
+def validate_quote_set(
+    quotes: dict[str, Quote], specs: dict[str, OptionSpec], settings: Settings, now: datetime
+) -> None:
+    if set(quotes) != set(specs):
+        raise MarketDataError("Incomplete quote set")
+    for name, quote in quotes.items():
+        if quote.contract != specs[name]:
+            raise MarketDataError(f"{name}: contract mismatch")
+        if not 0 <= (now - quote.timestamp).total_seconds() <= settings.max_quote_age_seconds:
+            raise MarketDataError(f"{name}: stale quote")
+        if quote.ask - quote.bid > Decimal(str(settings.max_spread_points)):
+            raise MarketDataError(f"{name}: spread exceeds quality limit")
 
 
 class PaperEngine:
@@ -87,6 +122,7 @@ class PaperEngine:
         self.advisor = advisor
         self.settings = settings
         self.lock = asyncio.Lock()
+        self.entry_lock = asyncio.Lock()
         self.prepared: tuple[date, int, dict[str, OptionSpec]] | None = None
         self.last_error: str | None = None
         self.settlement_attempts: dict[str, datetime] = {}
@@ -104,23 +140,10 @@ class PaperEngine:
         )
 
     def validate_quotes(self, quotes: dict[str, Quote], specs: dict[str, OptionSpec]) -> None:
-        if set(quotes) != set(specs):
-            raise MarketDataError("Incomplete quote set")
-        now = utcnow()
-        for name, quote in quotes.items():
-            if quote.contract != specs[name]:
-                raise MarketDataError(f"{name}: contract mismatch")
-            if (
-                not 0
-                <= (now - quote.timestamp).total_seconds()
-                <= self.settings.max_quote_age_seconds
-            ):
-                raise MarketDataError(f"{name}: stale quote")
-            if quote.ask - quote.bid > Decimal(str(self.settings.max_spread_points)):
-                raise MarketDataError(f"{name}: spread exceeds quality limit")
+        validate_quote_set(quotes, specs, self.settings, utcnow())
 
     async def prepare(self) -> None:
-        async with self.lock:
+        async with self.entry_lock:
             now = utcnow()
             if not self.market.is_open(now):
                 return
@@ -132,16 +155,12 @@ class PaperEngine:
             self.prepared = (day, config.wing_width, contracts)
 
     async def vix(self) -> Decimal | None:
-        try:
-            return await self.provider.index("VIX")
-        except (MarketDataError, ConnectionError, TimeoutError, OSError) as exc:
-            await self.error("VIX context unavailable (trading math unaffected)", exc)
-            return None
+        return await vix_context(self.provider, self.error)
 
     async def entry(
         self, manual: bool = False, *, retest: ManualRetestRequest | None = None
     ) -> Trade:
-        async with self.lock:
+        async with self.entry_lock:
             if retest is not None and not manual:
                 raise ValueError("Retests must be explicitly requested as manual entries")
             trades = await self.store.trades()
@@ -176,6 +195,12 @@ class PaperEngine:
                 if not daily_exists:
                     raise ValueError("Manual retest requires an existing normal SPX entry today")
                 if any(trade.status in ACTIVE for trade in trades):
+                    raise ValueError(
+                        "Manual retest requires all existing SPX positions to be closed"
+                    )
+                if any(
+                    trade.status in BUTTERFLY_ACTIVE for trade in await self.store.butterflies()
+                ):
                     raise ValueError(
                         "Manual retest requires all existing SPX positions to be closed"
                     )
@@ -295,9 +320,10 @@ class PaperEngine:
             ) * trade.multiplier - trade.commissions_dollars
             trade.current_transform_credit = transformer_credit(quotes)
             trade.last_quote_at = min(quote.timestamp for quote in quotes.values())
-            await self.store.commit_trade(trade, legs, evaluation)
-            await self.csv.export()
-            await self.advisor.submit(evaluation)
+            async with self.lock:
+                await self.store.commit_trade(trade, legs, evaluation)
+                await self.csv.export()
+                await self.advisor.submit(evaluation)
             self.last_error = None
             return trade
 
@@ -545,6 +571,7 @@ class PaperEngine:
                         contract=spec,
                         action="BUY" if name.startswith("short") else "SELL",
                         simulated_fill_price=intrinsic(spec.strike, spec.right, value),
+                        quantity=trade.quantity,
                     )
                 )
             trade.settlement_value = value
@@ -606,5 +633,5 @@ class PaperEngine:
                 await self.error("automatic settlement proxy", exc, trade.trade_id)
 
     async def configure(self, config: TradingConfig) -> None:
-        async with self.lock:
+        async with self.entry_lock, self.lock:
             await self.store.save_config(config)

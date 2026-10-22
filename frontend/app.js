@@ -94,29 +94,36 @@ function historicalLegs(trade) {
   return details;
 }
 function card(trade) {
+  const butterfly = trade.strategy === "ZERO_DTE_BUTTERFLY";
+  const debit = butterfly ? trade.initial_debit : trade.calendar_debit_paid;
   const el = node("article",null,"trade");
   const head = node("div",null,"trade-head");
-  head.append(node("h3",trade.manual_retest ? "SPX · MANUAL RETEST" : "SPX"),node("span",`${trade.quantity} CONTRACT${trade.quantity > 1 ? "S" : ""}`,"pill"));
-  el.append(head,node("small",trade.trade_id),node("p",`${trade.front_expiry} → ${trade.back_expiry} · ${number(trade.put_strike,0)}P / ${number(trade.call_strike,0)}C`));
+  head.append(node("h3",butterfly ? "SPX · 0DTE BUTTERFLY" : trade.manual_retest ? "SPX · MANUAL RETEST" : "SPX · DOUBLE CALENDAR"),node("span",`${trade.quantity} SPREAD${trade.quantity > 1 ? "S" : ""}`,"pill"));
+  el.append(head,node("small",trade.trade_id),node("p",butterfly
+    ? `${trade.expiry} · ${trade.right === "C" ? "Call" : "Put"} debit · ${trade.wing_width}-point width`
+    : `${trade.front_expiry} → ${trade.back_expiry} · ${number(trade.put_strike,0)}P / ${number(trade.call_strike,0)}C`));
+  if (butterfly) el.append(node("p",`09:30 open ${number(trade.opening_index)} → signal ${number(trade.signal_price)} · ${stamp(trade.signal_timestamp)}`,"muted"));
   el.append(node("div",trade.transformed
     ? `RISK-FREE (MODELED): ${money(trade.net_floor_dollars)} net floor`
-    : `CALENDAR: ${money(Number(trade.calendar_debit_paid)*trade.quantity*100)} debit at risk`,
+    : `${butterfly ? "DEBIT SPREAD" : "CALENDAR"}: ${money(Number(debit)*trade.quantity*100)} debit at risk`,
     trade.transformed ? "badge free" : "badge"));
   if (trade.settlement_pending) el.append(node("p","Expiration passed · official PM settlement required","warn"));
   const dl = node("dl");
   const values = [
-    [trade.transformed ? "Condor close debit" : "Calendar liquidation credit",`${number(trade.mark_price)} pts`],
+    [butterfly ? "Natural liquidation credit" : trade.transformed ? "Condor close debit" : "Calendar liquidation credit",`${number(trade.mark_price)} pts`],
     ["Unrealized P&L (fees paid)",money(trade.unrealized_pnl_dollars)],
-    ["Initial debit",`${number(trade.calendar_debit_paid)} pts`],
+    ["Initial debit",`${number(debit)} pts`],
     ["Transform credit / target",`${number(trade.current_transform_credit)} / ${number(trade.target_credit)}`],
   ];
   for (const [label,value] of values) { const box=node("div");box.append(node("dt",label),node("dd",value));dl.append(box); }
   el.append(dl);
-  if (!trade.transformed) el.append(node("small",`Bot-monitored stop: −${number(trade.calendar_stop_loss_pct,0)}% of debit (${number(trade.calendar_stop_credit)} pts liquidation credit), before fees. No broker stop order.`));
+  if (!trade.transformed) el.append(node("small",`Bot-monitored stop: −${number(butterfly ? trade.stop_loss_pct : trade.calendar_stop_loss_pct,0)}% of debit (${number(butterfly ? trade.stop_credit : trade.calendar_stop_credit)} pts liquidation credit), before fees. No broker stop order.${butterfly ? " Exit if untransformed 15 minutes before session close." : ""}`));
   const progress=node("progress");
   progress.max=100;
   progress.value=Math.max(0,Math.min(100,Number(trade.current_transform_credit || 0)/Number(trade.target_credit)*100));
-  el.append(progress,node("small","Fee-aware target = opening debit + wing width + 8 leg commissions / 100"));
+  el.append(progress,node("small",butterfly
+    ? "Fee-funded target = opening debit + 4 leg commissions / 100. Modeled floor assumes quoted fills; stops can overshoot."
+    : "Fee-aware target = opening debit + wing width + 8 leg commissions / 100"));
   el.append(node("small",`${trade.quote_stale ? "STALE / UNAVAILABLE" : "LIVE SAMPLE"} · ${stamp(trade.last_quote_at)}`,trade.quote_stale ? "warn" : ""));
   el.append(tradeLegs(trade));
   return el;
@@ -136,22 +143,36 @@ function render(data) {
     metric("REALIZED PAPER P&L",money(m.total_pnl),`Win rate ${number(m.win_rate,1)}% · ${m.proxy_settled_trades} proxy settlements`),
     metric("PROFIT FACTOR",m.profit_factor == null ? m.profit_factor_label : number(m.profit_factor),`Best ${money(m.max_winner)} / Worst ${money(m.max_loser)}`),
   );
+  const b = data.butterfly_metrics;
+  $("butterfly-metrics").replaceChildren(
+    metric("0DTE TRADES",b.total_trades,`${b.closed_trades} closed · ${b.sessions_elapsed}/14 sessions`),
+    metric("BUTTERFLY TRANSFORMS",`${number(b.transform_success_rate,1)}%`,`${number(b.average_minutes_to_transform,1)} avg. minutes`),
+    metric("0DTE NET PAPER P&L",money(b.total_pnl),`Win rate ${number(b.win_rate,1)}% · ${b.proxy_settled_trades} proxy settlements`),
+    metric("0DTE PROFIT FACTOR",b.profit_factor == null ? b.profit_factor_label : number(b.profit_factor),`Best ${money(b.max_winner)} / Worst ${money(b.max_loser)}`),
+  );
   if (!initialized) {
     const form=$("config");
     for (const [key,value] of Object.entries(data.config)) {
       const field=form.elements.namedItem(key);
       if (field) { if (field.type === "checkbox") field.checked=value; else field.value=value; }
     }
+    for (const [key,value] of Object.entries(data.butterfly_config)) {
+      const field=$("butterfly-config").elements.namedItem(key);
+      if (field) { if (field.type === "checkbox") field.checked=value; else field.value=value; }
+    }
     initialized=true;
   }
   $("campaign").textContent=!data.config.enabled ? "New entries disabled; monitoring continues." :
     m.entry_window_complete ? "Entry study complete; monitoring remaining trades." : "DST-aware · NYSE holidays skipped";
+  $("butterfly-campaign").textContent=!data.butterfly_config.enabled ? "0DTE entries disabled; existing positions still monitored." :
+    b.entry_window_complete ? "14-session entry window complete; monitoring continues." : "10:00 minute only · no late catch-up · separate 14-session cohort";
+  $("cadence").textContent=`${data.poll_seconds}-second polling target · both strategies`;
   $("risk-policy").textContent=`New calendars: bot exits at −${data.risk_policy.calendar_stop_loss_pct}% of opening debit using natural liquidation prices, before fees. Entries already at that loss are rejected. No broker stop orders.`;
   const positions=data.trades.filter(t => active.has(t.status));
   const today = new Intl.DateTimeFormat("en-CA", {
     timeZone:"America/New_York", year:"numeric", month:"2-digit", day:"2-digit",
   }).format(new Date(data.server_time));
-  const dailyExists = data.trades.some(t => !t.manual_retest && t.entry_session === today);
+  const dailyExists = data.trades.some(t => t.strategy !== "ZERO_DTE_BUTTERFLY" && !t.manual_retest && t.entry_session === today);
   if (pendingRetest && data.trades.some(t => t.manual_retest_request_id === pendingRetest.request_id)) {
     sessionStorage.removeItem(retestStorageKey);
     pendingRetest = null;
@@ -164,12 +185,12 @@ function render(data) {
   $("retest").textContent = pendingRetest ? "Retry Manual Retest Request" : "Manual Retest";
   $("retest-help").textContent = pendingRetest
     ? `Pending request ${pendingRetest.request_id}. Retry uses the same ID and cannot duplicate a recorded retest.`
-    : "Extra test only: requires today's normal entry and no active SPX positions. All performance metrics include retests; these are not scheduled study samples.";
+    : "Extra test only: requires today's normal calendar entry and no active SPX positions. Calendar performance metrics include retests; these are not scheduled study samples.";
   $("trades").replaceChildren(...(positions.length ? positions.map(card) : [node("div","No active trades. Waiting for the next valid market entry.","empty")]));
   const pending=positions.filter(t => t.settlement_pending);
   const selected=$("settlement-trades").value;
   $("settlement-trades").replaceChildren(...(pending.length ? pending.map(t => {
-    const option=node("option",`${t.trade_id} · ${t.front_expiry}`);
+    const option=node("option",`${t.trade_id} · ${t.expiry ?? t.front_expiry}`);
     option.value=t.trade_id;return option;
   }) : [node("option","No pending expirations")]));
   if (!pending.length) $("settlement-trades").firstChild.value="";
@@ -178,7 +199,7 @@ function render(data) {
     const row=node("tr");
     const identity=node("td",null,"trade-identity");
     identity.append(node("span",t.trade_id + (t.manual_retest ? " (MANUAL RETEST)" : "")),historicalLegs(t));
-    row.append(identity,node("td",t.status.replace("CLOSED_","") + (t.settlement_provenance === "ibkr_close_proxy" ? " (IBKR PROXY)" : "")),node("td",`${number(t.calendar_stop_loss_pct,0)}%`),node("td",money(t.final_pnl_dollars),Number(t.final_pnl_dollars)>=0?"good":"bad"),node("td",`${number(t.roi_pct)}%`));return row;
+    row.append(identity,node("td",t.status.replace("CLOSED_","") + (t.settlement_provenance === "ibkr_close_proxy" ? " (IBKR PROXY)" : "")),node("td",`${number(t.stop_loss_pct ?? t.calendar_stop_loss_pct,0)}%`),node("td",money(t.final_pnl_dollars),Number(t.final_pnl_dollars)>=0?"good":"bad"),node("td",`${number(t.roi_pct)}%`));return row;
   }));
   $("advisor-mode").textContent=data.advisor_enabled ? "LLM ENABLED" : "LLM DISABLED";
   $("feed").replaceChildren(...(data.feed.length ? data.feed.map(item => {
@@ -191,6 +212,13 @@ $("config").addEventListener("submit",async(event) => {
   try {
     await api("/api/config","PUT",{symbol:"SPX",quantity:Number(f.quantity.value),wing_width:Number(f.wing_width.value),commission_per_leg:Number(f.commission_per_leg.value),enabled:f.enabled.checked});
     toast("Configuration saved. Existing trade parameters are unchanged.");
+  } catch(error) {toast(error.message);}
+});
+$("butterfly-config").addEventListener("submit",async(event) => {
+  event.preventDefault();const f=event.target.elements;
+  try {
+    await api("/api/config/butterfly","PUT",{quantity:Number(f.quantity.value),wing_width:Number(f.wing_width.value),commission_per_leg:Number(f.commission_per_leg.value),enabled:f.enabled.checked});
+    toast("0DTE settings saved. Existing trades and calendar settings are unchanged.");
   } catch(error) {toast(error.message);}
 });
 $("entry").addEventListener("click",async() => {
@@ -241,9 +269,11 @@ $("settlement").addEventListener("submit",async(event) => {
 });
 setInterval(() => {
   if (!latest) return;
-  const remaining=Math.max(0,new Date(latest.next_entry)-new Date());
+  for (const [id,when] of [["countdown",latest.next_entry],["butterfly-countdown",latest.next_butterfly_entry]]) {
+  const remaining=Math.max(0,new Date(when)-new Date());
   const days=Math.floor(remaining/86400000);
-  $("countdown").textContent=`${days ? `${days}d ` : ""}${String(Math.floor(remaining/3600000)%24).padStart(2,"0")}:${String(Math.floor(remaining/60000)%60).padStart(2,"0")}:${String(Math.floor(remaining/1000)%60).padStart(2,"0")}`;
+  $(id).textContent=`${days ? `${days}d ` : ""}${String(Math.floor(remaining/3600000)%24).padStart(2,"0")}:${String(Math.floor(remaining/60000)%60).padStart(2,"0")}:${String(Math.floor(remaining/1000)%60).padStart(2,"0")}`;
+  }
 },1000);
 function connect() {
   const socket=new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/stream`);

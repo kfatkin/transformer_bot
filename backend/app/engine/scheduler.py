@@ -7,23 +7,33 @@ from apscheduler.triggers.cron import CronTrigger
 from app.core.market import EASTERN
 from app.core.models import utcnow
 from app.engine.paper_engine import PaperEngine
+from app.engine.butterfly_engine import ButterflyEngine
 from app.ibkr.client import IBClient
 
 
 class Scheduler:
-    def __init__(self, engine: PaperEngine, client: IBClient) -> None:
+    def __init__(
+        self, engine: PaperEngine, client: IBClient, butterfly: ButterflyEngine | None = None
+    ) -> None:
         self.engine = engine
         self.client = client
+        self.butterfly = butterfly
         self.scheduler = AsyncIOScheduler(timezone=EASTERN)
 
-    async def guarded(self, component: str, action: Callable[[], Awaitable[object]]) -> None:
+    async def guarded(
+        self,
+        component: str,
+        action: Callable[[], Awaitable[object]],
+        *,
+        butterfly: ButterflyEngine | None = None,
+    ) -> None:
         try:
             await action()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             # Scheduled task boundary: persist and surface failures; never fake success.
-            await self.engine.error(component, exc)
+            await (butterfly or self.engine).error(component, exc)
 
     async def heartbeat(self) -> None:
         await self.guarded("IBKR connection", self.client.connect)
@@ -38,6 +48,35 @@ class Scheduler:
 
     async def preflight(self) -> None:
         await self.guarded("chain preflight", self.engine.prepare)
+
+    async def butterfly_heartbeat(self) -> None:
+        if self.butterfly is None:
+            return
+        await self.guarded("IBKR connection", self.client.connect)
+        await self.guarded("0DTE market poll", self.butterfly.poll, butterfly=self.butterfly)
+        if self.client.connected:
+            await self.guarded(
+                "0DTE expiration reconciliation",
+                self.butterfly.settle_due,
+                butterfly=self.butterfly,
+            )
+
+    async def butterfly_entry(self) -> None:
+        if self.butterfly is None:
+            return
+        if not self.butterfly.market.is_session(utcnow().astimezone(EASTERN).date()):
+            return
+        if not (await self.butterfly.store.butterfly_config()).enabled:
+            await self.butterfly.store.log(
+                "entry_skip",
+                {
+                    "strategy": "ZERO_DTE_BUTTERFLY",
+                    "timestamp": utcnow().isoformat(),
+                    "message": "10:00 0DTE entry disabled by configuration",
+                },
+            )
+            return
+        await self.guarded("0DTE scheduled entry", self.butterfly.entry, butterfly=self.butterfly)
 
     async def close_review(self) -> None:
         now = utcnow()
@@ -77,6 +116,21 @@ class Scheduler:
             next_run_time=utcnow(),
             **defaults,
         )
+        if self.butterfly is not None:
+            self.scheduler.add_job(
+                self.butterfly_entry,
+                CronTrigger(day_of_week="mon-fri", hour=10, minute=0, timezone=EASTERN),
+                id="butterfly-entry",
+                **defaults,
+            )
+            self.scheduler.add_job(
+                self.butterfly_heartbeat,
+                "interval",
+                seconds=self.engine.settings.poll_seconds,
+                id="butterfly-poll",
+                next_run_time=utcnow(),
+                **defaults,
+            )
         # Half-day closes are also reviewed; calendar remains the source of truth.
         for hour in (13, 16):
             self.scheduler.add_job(

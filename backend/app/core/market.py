@@ -27,12 +27,12 @@ class MarketCalendar:
         start, end = self.bounds(day)
         return start <= now < end
 
-    def next_entry(self, now: datetime) -> datetime:
+    def next_entry(self, now: datetime, *, hour: int = 10, minute: int = 30) -> datetime:
         day = now.astimezone(EASTERN).date()
         for offset in range(370):
             candidate = day + timedelta(days=offset)
             at = datetime.combine(candidate, datetime.min.time(), EASTERN).replace(
-                hour=10, minute=30
+                hour=hour, minute=minute
             )
             if at > now and self.is_session(candidate):
                 return at

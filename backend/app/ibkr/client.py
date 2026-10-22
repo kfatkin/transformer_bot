@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -18,6 +20,15 @@ class MarketDataError(RuntimeError):
     pass
 
 
+@dataclass
+class Subscription:
+    contract: Contract
+    ticker: Ticker
+    seen: dict[int, datetime]
+    handler: Callable[[Ticker], None]
+    users: int = 1
+
+
 class IBClient:
     """Market-data-only adapter: deliberately exposes no order API."""
 
@@ -29,6 +40,7 @@ class IBClient:
         self.ib.errorEvent += self._on_error
         self.connection_lock = asyncio.Lock()
         self.request_lock = asyncio.Lock()
+        self.subscriptions: dict[int, Subscription] = {}
 
     @property
     def connected(self) -> bool:
@@ -56,13 +68,10 @@ class IBClient:
 
     async def qualify(self, contracts: list[Contract]) -> list[Contract]:
         await self.connect()
-        async with self.request_lock:
-            try:
-                result = await asyncio.wait_for(
-                    self.ib.qualifyContractsAsync(*contracts), timeout=30
-                )
-            except RequestError as exc:
-                raise MarketDataError(f"IBKR qualification failed: {exc}") from exc
+        try:
+            result = await asyncio.wait_for(self.ib.qualifyContractsAsync(*contracts), timeout=30)
+        except RequestError as exc:
+            raise MarketDataError(f"IBKR qualification failed: {exc}") from exc
         if len(result) != len(contracts) or any(
             not isinstance(item, Contract) or item.conId <= 0 for item in result
         ):
@@ -101,78 +110,89 @@ class IBClient:
             right="P" if contract.right == "P" else "C",
         )
 
+    def _subscribe(self, contract: Contract) -> Subscription:
+        existing = self.subscriptions.get(contract.conId)
+        if existing:
+            existing.users += 1
+            return existing
+        ticker = self.ib.reqMktData(contract, "", False, False)
+        seen: dict[int, datetime] = {}
+
+        def on_update(updated: Ticker) -> None:
+            for tick in updated.ticks:
+                if tick.tickType in {1, 2, 4}:
+                    seen[tick.tickType] = tick.time
+
+        ticker.updateEvent.connect(on_update)
+        subscription = Subscription(contract, ticker, seen, on_update)
+        self.subscriptions[contract.conId] = subscription
+        return subscription
+
+    def _release(self, subscription: Subscription) -> None:
+        # A contract may be shared by entry and monitoring; never cancel the other sampler.
+        subscription.users -= 1
+        if subscription.users == 0:
+            subscription.ticker.updateEvent.disconnect(subscription.handler)
+            del self.subscriptions[subscription.contract.conId]
+            if self.connected:
+                self.ib.cancelMktData(subscription.contract)
+
     async def _sample(
         self, contracts: list[Contract], require_delta: bool = False
     ) -> list[tuple[Ticker, datetime]]:
         await self.connect()
-        # Isolated subscriptions guarantee these observations belong to this sample.
-        async with self.request_lock:
-            tickers: list[Ticker] = []
-            handlers = []
-            seen: dict[int, dict[int, datetime]] = {}
-            try:
-                for contract in contracts:
-                    ticker = self.ib.reqMktData(contract, "", False, False)
-                    tickers.append(ticker)
-                    seen[contract.conId] = {}
-
-                    def on_update(updated: Ticker, con_id: int = contract.conId) -> None:
-                        for tick in updated.ticks:
-                            if tick.tickType in {1, 2, 4}:
-                                seen[con_id][tick.tickType] = tick.time
-
-                    ticker.updateEvent.connect(on_update)
-                    handlers.append(on_update)
-                deadline = asyncio.get_running_loop().time() + self.settings.quote_timeout_seconds
-                while asyncio.get_running_loop().time() < deadline:
-                    now = utcnow()
-                    ready = True
-                    for contract, ticker in zip(contracts, tickers, strict=True):
-                        ticks = seen[contract.conId]
-                        required = {1, 2} if contract.secType == "OPT" else {4}
-                        times = [ticks.get(kind) for kind in required]
-                        if (
-                            ticker.marketDataType != 1
-                            or any(
-                                stamp is None
-                                or not 0
-                                <= (now - stamp).total_seconds()
-                                <= self.settings.max_quote_age_seconds
-                                for stamp in times
+        acquired: list[Subscription] = []
+        try:
+            for contract in contracts:
+                acquired.append(self._subscribe(contract))
+            deadline = asyncio.get_running_loop().time() + self.settings.quote_timeout_seconds
+            while asyncio.get_running_loop().time() < deadline:
+                if not self.connected:
+                    raise ConnectionError("IBKR disconnected during quote sampling")
+                now = utcnow()
+                ready = True
+                for sample in acquired:
+                    ticker = sample.ticker
+                    required = {1, 2} if sample.contract.secType == "OPT" else {4}
+                    if (
+                        ticker.marketDataType != 1
+                        or any(
+                            sample.seen.get(kind) is None
+                            or not 0
+                            <= (now - sample.seen[kind]).total_seconds()
+                            <= self.settings.max_quote_age_seconds
+                            for kind in required
+                        )
+                        or (
+                            require_delta
+                            and (
+                                ticker.modelGreeks is None
+                                or ticker.modelGreeks.delta is None
+                                or not math.isfinite(ticker.modelGreeks.delta)
                             )
-                            or (
-                                require_delta
-                                and (
-                                    ticker.modelGreeks is None
-                                    or ticker.modelGreeks.delta is None
-                                    or not math.isfinite(ticker.modelGreeks.delta)
-                                )
-                            )
-                        ):
-                            ready = False
-                            break
-                    if ready:
-                        return [
-                            (
-                                ticker,
-                                min(
-                                    seen[contract.conId][kind]
-                                    for kind in ({1, 2} if contract.secType == "OPT" else {4})
-                                ),
-                            )
-                            for contract, ticker in zip(contracts, tickers, strict=True)
-                        ]
-                    await asyncio.sleep(0.1)
-                raise MarketDataError(
-                    "Live bid/ask or Greeks timed out; check SPX subscriptions and API permissions"
-                    + (f". {self.last_error}" if self.last_error else "")
-                )
-            finally:
-                for ticker, handler in zip(tickers, handlers):
-                    ticker.updateEvent.disconnect(handler)
-                if self.connected:
-                    for contract in contracts[: len(tickers)]:
-                        self.ib.cancelMktData(contract)
+                        )
+                    ):
+                        ready = False
+                        break
+                if ready:
+                    return [
+                        (
+                            sample.ticker,
+                            min(
+                                sample.seen[kind]
+                                for kind in ({1, 2} if sample.contract.secType == "OPT" else {4})
+                            ),
+                        )
+                        for sample in acquired
+                    ]
+                await asyncio.sleep(0.1)
+            raise MarketDataError(
+                "Live bid/ask or Greeks timed out; check SPX subscriptions and API permissions"
+                + (f". {self.last_error}" if self.last_error else "")
+            )
+        finally:
+            for sample in acquired:
+                self._release(sample)
 
     async def quotes(
         self, specs: dict[str, OptionSpec], require_delta: bool = False
@@ -248,6 +268,31 @@ class IBClient:
         raise MarketDataError(
             f"No historical SPX daily close for {expiry}; settlement stays pending"
         )
+
+    async def session_open(self, day: date) -> Decimal:
+        contracts = await self.qualify([Index("SPX", "CBOE", "USD")])
+        opening = datetime.combine(day, datetime.min.time(), EASTERN).replace(hour=9, minute=30)
+        try:
+            bars = await self.ib.reqHistoricalDataAsync(
+                contracts[0],
+                endDateTime=opening + timedelta(minutes=1),
+                durationStr="120 S",
+                barSizeSetting="1 min",
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=2,
+                timeout=20,
+            )
+        except RequestError as exc:
+            raise MarketDataError(f"IBKR opening-index request failed: {exc}") from exc
+        for bar in bars:
+            if not isinstance(bar.date, datetime) or bar.date.tzinfo is None:
+                continue
+            if bar.date.astimezone(EASTERN) == opening:
+                if not math.isfinite(bar.open) or bar.open <= 0:
+                    raise MarketDataError("Invalid 09:30 SPX opening-index value")
+                return Decimal(str(bar.open))
+        raise MarketDataError(f"No exact 09:30 regular-session SPX opening bar for {day}")
 
     def disconnect(self) -> None:
         self.ib.disconnect()

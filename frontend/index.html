@@ -15,12 +15,14 @@
   <main>
     <div class="notice">SPX / SPXW only · Simulated natural bid/ask fills · No orders submitted to IBKR · A modeled floor is not an execution guarantee.</div>
     <div id="error" role="alert" class="error hidden"></div>
-    <div class="section-heading"><div><span class="eyebrow">10–14 SESSION STUDY</span><h2>Performance overview</h2></div><a class="button secondary" href="/api/report">Download Full CSV Report ↓</a></div>
+    <div class="section-heading"><div><span class="eyebrow">DOUBLE CALENDAR STUDY</span><h2>Calendar performance</h2></div><a class="button secondary" href="/api/report">Download Full CSV Report ↓</a></div>
     <section id="metrics" class="metrics" aria-live="polite"></section>
+    <div class="section-heading"><div><span class="eyebrow">INDEPENDENT 14-SESSION STUDY</span><h2>0DTE butterfly performance</h2></div></div>
+    <section id="butterfly-metrics" class="metrics" aria-live="polite"></section>
     <div class="workspace">
       <aside>
         <section class="panel">
-          <span class="eyebrow">STRATEGY PARAMETERS</span><h2>Control room</h2>
+          <span class="eyebrow">10:30 EASTERN</span><h2>Double calendar controls</h2>
           <form id="config">
             <label>Target ticker<select name="symbol"><option value="SPX">SPX · PM-settled SPXW</option></select></label>
             <label>Contracts per trade<input name="quantity" type="number" min="1" max="100" value="1" required></label>
@@ -39,6 +41,19 @@
           <div class="schedule"><span class="eyebrow">NEXT 10:30 EASTERN ENTRY</span><strong id="countdown">--</strong><span id="campaign" class="muted"></span></div>
         </section>
         <section class="panel">
+          <span class="eyebrow">10:00 EASTERN · CONTRARIAN</span><h2>0DTE butterfly controls</h2>
+          <p class="muted">Below the 09:30 SPX opening bar: call debit. Above: put debit. Flat or missing baseline: skip. Long delta 0.30–0.50, closest to 0.40. No late or manual entry.</p>
+          <form id="butterfly-config">
+            <label>Spreads per trade<input name="quantity" type="number" min="1" max="100" value="1" required></label>
+            <label>Strike spacing<select name="wing_width"><option value="5">5 points</option><option value="10">10 points</option></select></label>
+            <label>Commission / contract / leg ($)<input name="commission_per_leg" type="number" min="0" max="10" step="0.01" value="0.65" required></label>
+            <label class="check"><input name="enabled" type="checkbox"> Enable 0DTE daily entries (opt-in)</label>
+            <button type="submit">Save 0DTE configuration</button>
+          </form>
+          <p class="muted">30% bot-monitored loss trigger before fees; sampled stops can overshoot. Sell an additional middle option and buy an outer wing only when credit covers entry debit and all four leg commissions. Modeled floor is not a fill guarantee. Untransformed positions exit 15 minutes before the actual session close.</p>
+          <div class="schedule"><span class="eyebrow">NEXT 10:00 EASTERN ENTRY</span><strong id="butterfly-countdown">--</strong><span id="butterfly-campaign" class="muted"></span></div>
+        </section>
+        <section class="panel">
           <span class="eyebrow">CASH SETTLEMENT</span><h2>Expiration reconciliation</h2>
           <p class="muted">Automatic mode uses the delayed IBKR closing-index proxy, not a certified exercise-settlement value. To reconcile a pending trade manually, use the verified SPXW PM value, never AM SET.</p>
           <form id="settlement">
@@ -51,7 +66,7 @@
         </section>
       </aside>
       <div class="main-column">
-        <div class="section-heading"><div><span class="eyebrow">LIVE POSITION MONITOR</span><h2>Active paper trades</h2></div><span class="muted">15–30 sec quote cadence</span></div>
+        <div class="section-heading"><div><span class="eyebrow">LIVE POSITION MONITOR</span><h2>Active paper trades</h2></div><span id="cadence" class="muted">20-second polling target</span></div>
         <section id="trades" class="trade-grid"></section>
         <section class="panel feed-panel"><div class="section-heading"><div><span class="eyebrow">MARKET STRUCTURE NOTES</span><h2>AI reasoning feed</h2></div><span id="advisor-mode" class="pill"></span></div><div id="feed"></div></section>
         <section class="panel"><h2>Completed trades</h2><div class="table-scroll"><table><thead><tr><th>Trade</th><th>Outcome</th><th>Bot loss trigger</th><th>Net P&amp;L</th><th>ROI</th></tr></thead><tbody id="history"></tbody></table></div></section>

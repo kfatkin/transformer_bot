@@ -65,17 +65,25 @@ class Advisor:
 
     async def reason(self, client: httpx.AsyncClient, evaluation: Evaluation) -> str:
         context = {
+            "strategy": evaluation.strategy,
             "event": evaluation.kind,
             "transform_credit": str(evaluation.transformer_credit),
             "target": str(evaluation.target_credit),
             "vix": str(evaluation.vix),
             **evaluation.context,
         }
+        focus = (
+            "Discuss the contrarian entry signal, quote quality, and whether adjustment credit "
+            "covers the original debit and all modeled opening/adjustment commissions. "
+            "Do not discuss front/back IV: all butterfly contracts have the same expiration. "
+            if evaluation.strategy == "ZERO_DTE_BUTTERFLY"
+            else "Discuss front/back IV ratio (above 1 means backwardation), quote quality, "
+            "and whether the arithmetic transform threshold was met. "
+        )
         prompt = (
             "Explain this SPX paper-trade observation in exactly two short sentences. "
-            "Discuss front/back IV ratio (above 1 means backwardation), quote quality, "
-            "and whether the arithmetic transform threshold was met. "
-            "Unknown values are unavailable, never infer them. No investment advice, "
+            + focus
+            + "Unknown values are unavailable, never infer them. No investment advice, "
             "no claim of guaranteed execution. Return only JSON with key 'sentences', "
             "an array of exactly two strings, each a single complete sentence ending "
             f"in a period, without abbreviations or Markdown. Facts: {context}"

@@ -224,3 +224,109 @@ async def test_historical_proxy_matches_exact_expiration_date(available):
     else:
         with pytest.raises(MarketDataError, match="stays pending"):
             await client.settlement_close(date(2026, 10, 30))
+
+
+class ManualIB(FakeIB):
+    def __init__(self):
+        super().__init__()
+        self.tickers = {}
+        self.requests = []
+        self.connected = True
+
+    def isConnected(self):
+        return self.connected
+
+    def reqMktData(self, contract, *args):
+        self.requests.append(contract.conId)
+        ticker = Ticker(contract=contract, marketDataType=1)
+        self.tickers[contract.conId] = ticker
+        return ticker
+
+    def publish(self, con_id):
+        ticker = self.tickers[con_id]
+        ticker.bid, ticker.ask = 1, 1.1
+        ticker.bidSize = ticker.askSize = 10
+        now = datetime.now(timezone.utc)
+        ticker.ticks = [TickData(now, 1, 1, 10), TickData(now, 2, 1.1, 10)]
+        ticker.updateEvent.emit(ticker)
+
+
+async def test_shared_subscription_cancellation_preserves_other_sampler():
+    client = IBClient(Settings(quote_timeout_seconds=2))
+    fake = ManualIB()
+    client.ib = fake
+    spec = OptionSpec(con_id=10, expiry=date(2026, 10, 30), strike=6000, right="P")
+    first = asyncio.create_task(client.quotes({"put": spec}))
+    second = asyncio.create_task(client.quotes({"put": spec}))
+    try:
+        await asyncio.sleep(0)
+        assert fake.requests == [10]
+        assert client.subscriptions[10].users == 2
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert fake.cancelled == []
+        assert client.subscriptions[10].users == 1
+        fake.publish(10)
+        assert (await second)["put"].bid == 1
+        assert fake.cancelled == [10]
+        assert client.subscriptions == {}
+    finally:
+        for task in (first, second):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+async def test_quote_disconnect_cleans_pool_and_allows_fresh_subscription():
+    client = IBClient(Settings(quote_timeout_seconds=2))
+    fake = ManualIB()
+    client.ib = fake
+    spec = OptionSpec(con_id=10, expiry=date(2026, 10, 30), strike=6000, right="P")
+    first = asyncio.create_task(client.quotes({"put": spec}))
+    await asyncio.sleep(0)
+    fake.connected = False
+    with pytest.raises(ConnectionError, match="disconnected"):
+        await first
+    assert client.subscriptions == {}
+    fake.connected = True
+    second = asyncio.create_task(client.quotes({"put": spec}))
+    await asyncio.sleep(0)
+    fake.publish(10)
+    assert (await second)["put"].ask == Decimal("1.1")
+    assert fake.requests == [10, 10]
+
+
+@pytest.mark.parametrize(
+    "timestamp,value,valid",
+    [
+        (datetime(2026, 10, 19, 13, 30, tzinfo=timezone.utc), 6000, True),
+        (datetime(2026, 10, 19, 13, 31, tzinfo=timezone.utc), 6000, False),
+        (datetime(2026, 10, 19, 13, 30), 6000, False),
+        (datetime(2026, 10, 16, 13, 30, tzinfo=timezone.utc), 6000, False),
+        (datetime(2026, 10, 19, 13, 30, tzinfo=timezone.utc), float("nan"), False),
+    ],
+)
+async def test_exact_opening_bar_no_fallback(timestamp, value, valid):
+    client = IBClient(Settings())
+
+    async def qualify(contracts):
+        return [Index("SPX", "CBOE", "USD", conId=100)]
+
+    async def historical(contract, **kwargs):
+        assert kwargs["barSizeSetting"] == "1 min"
+        assert kwargs["useRTH"] is True
+        assert kwargs["formatDate"] == 2
+        assert kwargs["endDateTime"].hour == 9
+        assert kwargs["endDateTime"].minute == 31
+        return [BarData(date=timestamp, open=value, close=9999)]
+
+    client.qualify = qualify
+    fake = FakeIB()
+    fake.reqHistoricalDataAsync = historical
+    client.ib = fake
+    if valid:
+        assert await client.session_open(date(2026, 10, 19)) == 6000
+    else:
+        with pytest.raises(MarketDataError, match="09:30"):
+            await client.session_open(date(2026, 10, 19))

@@ -78,3 +78,41 @@ test("building display groups never mutates the persisted trade shape",() => {
   tradeLegGroups(value);
   assert.deepEqual(value,original);
 });
+
+function butterfly(status = "ACTIVE_DEBIT_SPREAD", transformed = false) {
+  return {
+    strategy:"ZERO_DTE_BUTTERFLY", status, transformed, quantity:3,
+    contracts:Object.fromEntries(["long","short","outer"].map((name,i) => [
+      name, {symbol:"SPX",strike:6000 + i*5,expiry:"2026-10-20",right:"C",con_id:2000+i},
+    ])),
+  };
+}
+
+test("debit spread has only its two held legs",() => {
+  const groups = tradeLegGroups(butterfly());
+  assert.equal(groups.length,1);
+  assert.equal(groups[0].current,true);
+  assert.deepEqual(groups[0].legs.map(leg => leg.name),["long","short"]);
+  assert.deepEqual(groups[0].legs.map(leg => leg.quantity),[3,3]);
+});
+
+test("funded butterfly doubles only the CURRENT middle shorts",() => {
+  const value = butterfly("RISK_FREE_BUTTERFLY",true);
+  const original = structuredClone(value);
+  const groups = tradeLegGroups(value);
+  assert.deepEqual(groups[0].legs.map(leg => leg.quantity),[3,6,3]);
+  assert.deepEqual(groups[1].legs.map(leg => leg.quantity),[3,3]);
+  assert.equal(groups[0].legs[1].position,"Short / SELL");
+  assert.equal(groups[0].current,true);
+  assert.equal(groups[1].current,false);
+  assert.deepEqual(value,original);
+});
+
+for (const [status,transformed] of [
+  ["CLOSED_0DTE_TIME_EXIT",false],["CLOSED_UNTRANSFORMED_EXPIRY",false],
+  ["CLOSED_PARTIAL_PROFIT",true],["CLOSED_FLOOR",true],
+]) {
+  test(`${status} butterfly keeps history without claiming current positions`,() => {
+    assert.ok(tradeLegGroups(butterfly(status,transformed)).every(group => !group.current));
+  });
+}

@@ -15,9 +15,10 @@ from app.core.config import Settings
 from app.core.market import MarketCalendar
 from app.core.store import Store
 from app.engine.csv_logger import CSVLogger
+from app.engine.butterfly_engine import ButterflyEngine
 from app.engine.paper_engine import PaperEngine
 from app.engine.scheduler import Scheduler
-from app.ibkr.chains import ChainSelector
+from app.ibkr.chains import ButterflySelector, ChainSelector
 from app.ibkr.client import IBClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -35,11 +36,15 @@ def create_app(settings: Settings | None = None, run_scheduler: bool = True) -> 
         csv = CSVLogger(store, settings.data_dir / "csv")
         advisor = Advisor(settings, store)
         engine = PaperEngine(store, ib, ChainSelector(ib, market), market, csv, advisor, settings)
+        butterfly = ButterflyEngine(
+            store, ib, ButterflySelector(ib), market, csv, advisor, settings
+        )
         app.state.engine = engine
+        app.state.butterfly = butterfly
         app.state.ib = ib
         await csv.export()
         worker = asyncio.create_task(advisor.run(), name="advisor")
-        scheduler = Scheduler(engine, ib)
+        scheduler = Scheduler(engine, ib, butterfly)
         if run_scheduler:
             scheduler.start()
         try:
@@ -52,7 +57,7 @@ def create_app(settings: Settings | None = None, run_scheduler: bool = True) -> 
             worker.cancel()
             with suppress(asyncio.CancelledError):
                 await worker
-            async with engine.lock:
+            async with engine.entry_lock, engine.lock, butterfly.entry_lock, butterfly.lock:
                 ib.disconnect()
                 await store.engine.dispose()
 

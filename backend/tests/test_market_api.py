@@ -55,6 +55,9 @@ def test_api_dashboard_config_export_and_same_origin(tmp_path):
         state = client.get("/api/state").json()
         assert state["metrics"]["total_trades"] == 0
         assert state["connected"] is False
+        assert state["butterfly_config"]["enabled"] is False
+        assert state["butterfly_metrics"]["total_trades"] == 0
+        assert datetime.fromisoformat(state["next_butterfly_entry"]).minute == 0
         assert state["risk_policy"]["calendar_stop_loss_pct"] == "30"
         assert state["risk_policy"]["broker_stop_orders"] is False
         assert state["risk_policy"]["reject_at_stop_on_entry"] is True
@@ -71,6 +74,20 @@ def test_api_dashboard_config_export_and_same_origin(tmp_path):
         assert client.get("/api/state").json()["config"]["quantity"] == 3
         assert client.put("/api/config", json={"symbol": "SPY"}).status_code == 422
         assert client.put("/api/config", json={"quantity": 0}).status_code == 422
+        assert (
+            client.put(
+                "/api/config/butterfly",
+                json={"enabled": True, "quantity": 2, "wing_width": 5, "commission_per_leg": 0.75},
+            ).status_code
+            == 200
+        )
+        assert client.put("/api/config/butterfly", json={"wing_width": 1}).status_code == 422
+        assert client.put("/api/config/butterfly", json={"quantity": 0}).status_code == 422
+        assert client.get("/api/state").json()["config"]["quantity"] == 3
+        assert client.get("/api/csv/butterfly_trades_summary.csv").text.startswith(
+            "trade_id,strategy,"
+        )
+        assert client.get("/api/csv/butterfly_legs_execution_log.csv").status_code == 200
         assert (
             client.post(
                 "/api/entry", json={}, headers={"Origin": "http://evil.invalid"}
@@ -100,6 +117,8 @@ def test_api_dashboard_config_export_and_same_origin(tmp_path):
         base_url="http://localhost",
     ) as client:
         assert client.get("/api/state").json()["config"]["quantity"] == 3
+        assert client.get("/api/state").json()["butterfly_config"]["quantity"] == 2
+        assert client.get("/api/state").json()["butterfly_config"]["enabled"] is True
 
 
 async def test_stale_quote_rejected(lab):

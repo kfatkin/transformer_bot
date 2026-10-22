@@ -1,0 +1,16 @@
+{
+  "description": "SYNTHETIC ONLY: call debit to fully fee-funded butterfly; not market results",
+  "entry_time": "2026-10-19T14:00:00+00:00",
+  "transform_time": "2026-10-19T14:42:00+00:00",
+  "settlement_time": "2026-10-19T20:05:00+00:00",
+  "opening_index": "6000",
+  "signal_price": "5990",
+  "settlement": "6005",
+  "contracts": {
+    "long": {"con_id": 2001, "expiry": "2026-10-19", "strike": "6000", "right": "C"},
+    "short": {"con_id": 2002, "expiry": "2026-10-19", "strike": "6005", "right": "C"},
+    "outer": {"con_id": 2003, "expiry": "2026-10-19", "strike": "6010", "right": "C"}
+  },
+  "entry_quotes": {"long": ["4", "4.1"], "short": ["2.1", "2.2"], "outer": ["0.2", "0.3"]},
+  "transform_quotes": {"long": ["5", "5.1"], "short": ["2.326", "2.426"], "outer": ["0.2", "0.3"]}
+}

@@ -89,6 +89,7 @@ class LegEvent(BaseModel):
     simulated_fill_price: Decimal
     delta: float | None = None
     implied_vol: float | None = None
+    quantity: int | None = Field(default=None, ge=1)
 
 
 class Trade(BaseModel):
@@ -169,6 +170,7 @@ class Trade(BaseModel):
 
 
 class Evaluation(BaseModel):
+    strategy: Literal["DOUBLE_CALENDAR", "ZERO_DTE_BUTTERFLY"] = "DOUBLE_CALENDAR"
     trade_id: str
     timestamp: datetime
     kind: str

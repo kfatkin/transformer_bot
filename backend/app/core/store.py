@@ -9,7 +9,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from app.core.config import TradingConfig
+from app.core.butterfly import ButterflyTrade
+from app.core.config import ButterflyConfig, TradingConfig
 from app.core.models import Evaluation, LegEvent, Trade, utcnow
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,15 @@ class LogRow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     kind: Mapped[str] = mapped_column(String, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class ButterflyRow(Base):
+    __tablename__ = "butterfly_trades"
+    __table_args__ = (Index("uq_butterfly_daily_entry", "symbol", "entry_session", unique=True),)
+    trade_id: Mapped[str] = mapped_column(String, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String)
+    entry_session: Mapped[str] = mapped_column(String)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
@@ -157,3 +167,44 @@ class Store:
     async def save_config(self, config: TradingConfig) -> None:
         async with self.sessions.begin() as session:
             await session.merge(ConfigRow(key="trading", payload=config.model_dump(mode="json")))
+
+    async def butterflies(self) -> list[ButterflyTrade]:
+        async with self.sessions() as session:
+            rows = await session.scalars(
+                select(ButterflyRow).order_by(ButterflyRow.entry_session, ButterflyRow.trade_id)
+            )
+            return [ButterflyTrade.model_validate(row.payload) for row in rows]
+
+    async def commit_butterfly(
+        self, trade: ButterflyTrade, legs: list[LegEvent], evaluation: Evaluation | None = None
+    ) -> None:
+        async with self.sessions.begin() as session:
+            await session.merge(
+                ButterflyRow(
+                    trade_id=trade.trade_id,
+                    symbol=trade.symbol,
+                    entry_session=trade.entry_session.isoformat(),
+                    payload=trade.model_dump(mode="json"),
+                )
+            )
+            for leg in legs:
+                session.add(
+                    LogRow(kind="leg", timestamp=leg.timestamp, payload=leg.model_dump(mode="json"))
+                )
+            if evaluation:
+                session.add(
+                    LogRow(
+                        kind="evaluation",
+                        timestamp=evaluation.timestamp,
+                        payload=evaluation.model_dump(mode="json"),
+                    )
+                )
+
+    async def butterfly_config(self) -> ButterflyConfig:
+        async with self.sessions() as session:
+            row = await session.get(ConfigRow, "butterfly")
+            return ButterflyConfig.model_validate(row.payload) if row else ButterflyConfig()
+
+    async def save_butterfly_config(self, config: ButterflyConfig) -> None:
+        async with self.sessions.begin() as session:
+            await session.merge(ConfigRow(key="butterfly", payload=config.model_dump(mode="json")))
